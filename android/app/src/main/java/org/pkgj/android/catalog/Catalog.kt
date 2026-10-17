@@ -25,6 +25,10 @@ enum class Category(val label: String, val key: String) {
     }
 }
 
+enum class CatalogPlatform(val label: String) {
+    PSVITA("PS Vita"), ALL("All platforms")
+}
+
 data class CatalogItem(
     val category: Category, val titleId: String, val contentId: String,
     val region: String, val title: String, val url: String, val size: Long?, val zrif: String = "",
@@ -75,7 +79,14 @@ object CatalogParser {
         !url.equals("MISSING", true) && !url.equals("CART ONLY", true)
 }
 
-data class CatalogFilter(val search: String = "", val region: String = "All", val category: String = "All", val sort: String = "Title")
+data class CatalogFilter(
+    val search: String = "",
+    val region: String = "All",
+    val category: String = "All",
+    val sort: String = "Title",
+    val platform: CatalogPlatform = CatalogPlatform.ALL,
+    val compatibilityStatus: String = "All"
+)
 
 fun CatalogFilter.sqlWhere(): Pair<String, Array<String>> {
     val parts = mutableListOf<String>(); val args = mutableListOf<String>()
@@ -86,5 +97,18 @@ fun CatalogFilter.sqlWhere(): Pair<String, Array<String>> {
     }
     if (region != "All") { parts += "region=?"; args += region }
     if (category != "All") { parts += "category=?"; args += category }
+    if (platform == CatalogPlatform.PSVITA) {
+        val vitaCategories = Category.entries.filter { it.vita3kRelevant }.map { it.name }
+        parts += "category IN (${vitaCategories.joinToString(",") { "?" }})"
+        args += vitaCategories
+    }
+    when (compatibilityStatus) {
+        "All" -> Unit
+        "Unreported" -> parts += "NOT EXISTS (SELECT 1 FROM compatibility c WHERE c.titleid=catalog.titleid)"
+        else -> {
+            parts += "EXISTS (SELECT 1 FROM compatibility c WHERE c.titleid=catalog.titleid AND instr(' / ' || c.status || ' / ', ' / ' || ? || ' / ') > 0)"
+            args += compatibilityStatus
+        }
+    }
     return (if (parts.isEmpty()) "" else "WHERE " + parts.joinToString(" AND ")) to args.toTypedArray()
 }

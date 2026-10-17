@@ -1,12 +1,15 @@
 # PKGj Android Catalog
 
-An Android port of [PKGj for PS Vita](https://github.com/blastrock/pkgj), rebuilt natively for Android. This repository contains the Android implementation; it does not include or build the Vita application.
+An Android port of [PKGj for PS Vita](https://github.com/blastrock/pkgj), rebuilt natively for Android.
+This repository does not include or build the Vita application.
 
-Browse the upstream PKGj catalogs, search and filter titles, queue PKG downloads, and export completed files and available license files through Android's document picker. Vita3K compatibility reports appear as colored status pills. Downloads are not installed automatically: open Vita3K and use its own install flow.
+Browse the upstream PKGj catalogs, search and filter titles, queue PKG downloads, and export completed files and available license files through Android's document picker.
+
+Vita3K compatibility reports status pills.
 
 ![PKGj Android Catalog on an AYN Odin](docs/screenshot.png)
 
-## Build on Arch Linux
+## Build on Linux
 
 Install Android Studio or the Android SDK, Android platform/build tools for API 35, and a JDK 17. The Gradle wrapper downloads the pinned Gradle version on first use.
 
@@ -28,17 +31,6 @@ To launch it from ADB:
 ```sh
 adb shell am start -n org.pkgj.android.catalog/org.pkgj.android.MainActivity
 ```
-
-## GitHub releases
-
-Push a version tag such as `v0.1.0` to run the checks and publish a GitHub Release with the APK attached:
-
-```sh
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-The release APK is built from the Gradle debug variant and uses Android's default debug signing key. It can be sideloaded for testing; it is not signed for Play Store distribution.
 
 ## Notes
 

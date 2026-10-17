@@ -114,6 +114,7 @@ class MainActivity : ComponentActivity() {
 private val Ink = Color(0xFF0B1020)
 private val SurfaceInk = Color(0xFF172136)
 private val Mint = Color(0xFF5CE0C3)
+private val VitaCompatibilityStatuses = listOf("Nothing", "Bootable", "Intro", "Menu", "Ingame -", "Ingame +", "Playable", "Unreported")
 
 @Composable
 private fun CatalogApp(repository: Repository, onImport: (Category) -> Unit, onFolder: () -> Unit,
@@ -176,21 +177,44 @@ private fun LibraryScreen(repository: Repository, listState: LazyListState,
     var region by remember { mutableStateOf("All") }
     var category by remember { mutableStateOf("All") }
     var sort by remember { mutableStateOf("Title") }
+    var platform by remember { mutableStateOf(CatalogPlatform.PSVITA) }
+    var compatibilityStatus by remember { mutableStateOf("All") }
     val version by repository.catalogVersion.collectAsState()
     val syncing by repository.syncing.collectAsState()
-    val filter = remember(search, region, category, sort) { CatalogFilter(search, region, category, sort) }
+    val categoryOptions = if (platform == CatalogPlatform.PSVITA) Category.entries.filter { it.vita3kRelevant } else Category.entries
+    val filter = remember(search, region, category, sort, platform, compatibilityStatus) {
+        CatalogFilter(search, region, category, sort, platform, compatibilityStatus)
+    }
     val paging = remember(filter, version) { repository.catalog(filter) }.collectAsLazyPagingItems()
     LaunchedEffect(filter) { listState.scrollToItem(0) }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         OutlinedTextField(search, { search = it }, label = { Text("Search") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         Row(Modifier.horizontalScroll(rememberScrollState()).padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            CatalogPlatform.entries.forEach { option ->
+                FilterChip(selected = platform == option, onClick = {
+                    platform = option
+                    category = "All"
+                    if (option == CatalogPlatform.ALL) compatibilityStatus = "All"
+                }, label = { Text(option.label) })
+            }
+        }
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf("All", "US", "EU", "JP", "ASIA").forEach { FilterChip(selected = region == it, onClick = { region = it }, label = { Text(it) }) }
             Spacer(Modifier.width(8.dp))
-            (listOf("All") + Category.entries.map { it.name }).forEach {
+            (listOf("All") + categoryOptions.map { it.name }).forEach {
                 FilterChip(selected = category == it, onClick = { category = it }, label = { Text(if (it == "All") it else Category.valueOf(it).label) })
             }
             Text("Sort", Modifier.align(Alignment.CenterVertically))
             listOf("Title", "Size").forEach { FilterChip(selected = sort == it, onClick = { sort = it }, label = { Text(it) }) }
+        }
+        if (platform == CatalogPlatform.PSVITA) {
+            Text("Compatibility", style = MaterialTheme.typography.labelMedium, color = Color(0xFFB7C5D9), modifier = Modifier.padding(top = 6.dp))
+            Row(Modifier.horizontalScroll(rememberScrollState()).padding(top = 4.dp, bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected = compatibilityStatus == "All", onClick = { compatibilityStatus = "All" }, label = { Text("All statuses") })
+                VitaCompatibilityStatuses.forEach { value ->
+                    FilterChip(selected = compatibilityStatus == value, onClick = { compatibilityStatus = value }, label = { Text(value) })
+                }
+            }
         }
         if (paging.itemCount == 0 && paging.loadState.refresh !is androidx.paging.LoadState.Loading)
             Text(if (syncing) "Updating catalog" else "No entries. Check Settings.", Modifier.padding(24.dp))

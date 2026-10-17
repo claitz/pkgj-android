@@ -4,7 +4,7 @@
 
 This repository contains the Android adaptation only. The Kotlin app lives under `android/`; Gradle wrapper, app sources, unit tests, and BSD license asset are self-contained there. The application ID is `org.pkgj.android.catalog`.
 
-The app has Library, Downloads, and Settings screens. Compose renders paged SQLite catalog results. A repository coordinates preferences, catalog refresh/import, downloads, and compatibility reports. WorkManager runs persistent foreground download jobs. Downloads use app-managed storage and can be exported with Android's Storage Access Framework. No all-files permission is requested.
+The app has Library, Downloads, and Settings screens. The library defaults to PS Vita content, with an all-platform option and Vita3K report-status filters. Compose renders paged SQLite catalog results. A repository coordinates preferences, catalog refresh/import, downloads, and compatibility reports. WorkManager runs persistent foreground download jobs. Downloads use app-managed storage and can be exported with Android's Storage Access Framework. No all-files permission is requested.
 
 The TSV parser follows the upstream PKGj column layouts, handles BOM and line endings, skips malformed rows, and stores catalog rows in SQLite. Vita game/demo entries can include an upstream zRIF. When present, the app converts it to a `.rif` alongside a completed PKG; it does not fabricate missing license data. New filenames use `[REGION-TITLEID] - Title vVersion` when those fields exist.
 
@@ -31,9 +31,9 @@ From `android/`, run:
 ./gradlew test lint assembleDebug
 ```
 
-The project uses Gradle 8.9, Android Gradle Plugin 8.7.3, Kotlin 2.0.21, JDK 17, and Android API 35. Unit tests cover TSV parsing, filename handling, compatibility XML and validators, filtering, download state transitions, HTTP resume validation, and license decoding. The last local validation passed 12 tests, lint with 0 errors (12 warnings), and `assembleDebug`.
+The project uses Gradle 8.9, Android Gradle Plugin 8.7.3, Kotlin 2.0.21, JDK 17, and Android API 35. Unit tests cover TSV parsing, filename handling, compatibility XML and validators, platform/status filtering, download state transitions, HTTP resume validation, and license decoding. The latest local validation passed 14 tests, lint with 0 errors, and `assembleDebug`.
 
-The debug APK was installed and launched on an AYN Odin 3 running Android 15. The app fetched and parsed the compatibility database; the screenshot in the repository shows colored status pills. Controller navigation, long background downloads, process-death recovery, export completion, and Vita3K installation still need the physical checks below.
+An earlier debug APK was installed and launched on an AYN Odin 3 running Android 15. The app fetched and parsed the compatibility database; the screenshot in the repository shows colored status pills. No ADB device was connected while validating the new platform and status filters, so this UI change was not smoke-tested on hardware. Controller navigation, long background downloads, process-death recovery, export completion, and Vita3K installation still need the physical checks below.
 
 ## Physical-device checklist
 
