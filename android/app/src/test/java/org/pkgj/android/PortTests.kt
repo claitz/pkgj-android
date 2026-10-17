@@ -100,13 +100,13 @@ class PortTests {
     }
 
     @Test fun filteringEscapesWildcardsAndAppliesRegionCategory() {
-        val (sql, args) = CatalogFilter("  game_%  ", "US", Category.GAMES.name, platform = CatalogPlatform.ALL).sqlWhere()
+        val (sql, args) = CatalogFilter("  game_%  ", "US", Category.GAMES.name).sqlWhere()
         assertTrue(sql.contains("title LIKE ?")); assertTrue(sql.contains("region=?")); assertTrue(sql.contains("category=?"))
-        assertArrayEquals(arrayOf("%game\\_\\%%", "%game\\_\\%%", "US", "GAMES"), args)
+        assertArrayEquals(arrayOf("%game\\_\\%%", "%game\\_\\%%", "US", "GAMES", "GAMES", "DLCS", "DEMOS", "THEMES"), args)
     }
 
-    @Test fun vitaPlatformFilterIncludesOnlyVitaCatalogs() {
-        val (sql, args) = CatalogFilter(platform = CatalogPlatform.PSVITA).sqlWhere()
+    @Test fun libraryAlwaysExcludesUnsupportedPlatforms() {
+        val (sql, args) = CatalogFilter().sqlWhere()
         assertTrue(sql.contains("category IN (?,?,?,?)"))
         assertArrayEquals(arrayOf("GAMES", "DLCS", "DEMOS", "THEMES"), args)
     }
@@ -115,11 +115,11 @@ class PortTests {
         val (reportedSql, reportedArgs) = CatalogFilter(compatibilityStatus = "Ingame +").sqlWhere()
         assertTrue(reportedSql.contains("EXISTS (SELECT 1 FROM compatibility"))
         assertTrue(reportedSql.contains("instr(' / ' || c.status"))
-        assertArrayEquals(arrayOf("Ingame +"), reportedArgs)
+        assertArrayEquals(arrayOf("GAMES", "DLCS", "DEMOS", "THEMES", "Ingame +"), reportedArgs)
 
         val (unreportedSql, unreportedArgs) = CatalogFilter(compatibilityStatus = "Unreported").sqlWhere()
         assertTrue(unreportedSql.contains("NOT EXISTS (SELECT 1 FROM compatibility"))
-        assertEquals(0, unreportedArgs.size)
+        assertArrayEquals(arrayOf("GAMES", "DLCS", "DEMOS", "THEMES"), unreportedArgs)
     }
 
     @Test fun transitionsDoNotTreatInterruptedAsComplete() {

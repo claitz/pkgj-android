@@ -25,9 +25,8 @@ enum class Category(val label: String, val key: String) {
     }
 }
 
-enum class CatalogPlatform(val label: String) {
-    PSVITA("PS Vita"), ALL("All platforms")
-}
+// Legacy categories remain readable for existing download records.
+val VitaCategories = Category.entries.filter { it.vita3kRelevant }
 
 data class CatalogItem(
     val category: Category, val titleId: String, val contentId: String,
@@ -84,7 +83,6 @@ data class CatalogFilter(
     val region: String = "All",
     val category: String = "All",
     val sort: String = "Title",
-    val platform: CatalogPlatform = CatalogPlatform.ALL,
     val compatibilityStatus: String = "All"
 )
 
@@ -97,11 +95,8 @@ fun CatalogFilter.sqlWhere(): Pair<String, Array<String>> {
     }
     if (region != "All") { parts += "region=?"; args += region }
     if (category != "All") { parts += "category=?"; args += category }
-    if (platform == CatalogPlatform.PSVITA) {
-        val vitaCategories = Category.entries.filter { it.vita3kRelevant }.map { it.name }
-        parts += "category IN (${vitaCategories.joinToString(",") { "?" }})"
-        args += vitaCategories
-    }
+    parts += "category IN (${VitaCategories.joinToString(",") { "?" }})"
+    args += VitaCategories.map { it.name }
     when (compatibilityStatus) {
         "All" -> Unit
         "Unreported" -> parts += "NOT EXISTS (SELECT 1 FROM compatibility c WHERE c.titleid=catalog.titleid)"

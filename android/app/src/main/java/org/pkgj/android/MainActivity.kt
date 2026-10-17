@@ -4,6 +4,12 @@ import android.Manifest
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.net.Uri
+import androidx.documentfile.provider.DocumentFile
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -15,19 +21,25 @@ import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.runtime.saveable.listSaver
+import androidx.paging.cachedIn
+import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import androidx.paging.compose.collectAsLazyPagingItems
@@ -111,128 +123,79 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private val Ink = Color(0xFF0B1020)
-private val SurfaceInk = Color(0xFF172136)
-private val Mint = Color(0xFF5CE0C3)
-private val VitaCompatibilityStatuses = listOf("Nothing", "Bootable", "Intro", "Menu", "Ingame -", "Ingame +", "Playable", "Unreported")
+internal val Ink = Color(0xFF101419)
+internal val SurfaceInk = Color(0xFF1A2028)
+internal val Mint = Color(0xFF74D5B5)
 
+
+@OptIn(ExperimentalCoroutinesApi::class)
 @Composable
 private fun CatalogApp(repository: Repository, onImport: (Category) -> Unit, onFolder: () -> Unit,
     onExport: (DownloadJob) -> Unit, onLicenseExport: (DownloadJob) -> Unit) {
-    val colors = darkColorScheme(primary = Mint, background = Ink, onBackground = Color(0xFFE8EDF7), surface = SurfaceInk, onSurface = Color(0xFFE8EDF7))
+    val colors = darkColorScheme(primary = Mint, onPrimary = Ink, secondary = Mint, secondaryContainer = Color(0xFF284439), onSecondaryContainer = Mint, background = Ink, onBackground = Color(0xFFE6E9EE), surface = SurfaceInk, onSurface = Color(0xFFE6E9EE), surfaceVariant = SurfaceInk, onSurfaceVariant = Color(0xFFA3ADB9), outline = Color(0xFF414B57), surfaceContainer = SurfaceInk, surfaceContainerHigh = Color(0xFF222A34), surfaceContainerHighest = Color(0xFF2B3540), surfaceContainerLow = Color(0xFF161C23), outlineVariant = Color(0xFF414B57))
     MaterialTheme(colorScheme = colors) {
-        var section by remember { mutableStateOf(0) }
+        var section by rememberSaveable { mutableStateOf(0) }
+        val screenState = rememberSaveableStateHolder()
+        val snackbar = remember { SnackbarHostState() }
         var selected by remember { mutableStateOf<CatalogItem?>(null) }
         val libraryListState = rememberLazyListState()
+        val libraryScope = rememberCoroutineScope()
+        val filterSaver = remember { listSaver<CatalogFilter, String>(
+            save = { listOf(it.search, it.region, it.category, it.sort, it.compatibilityStatus) },
+            restore = { CatalogFilter(it[0], it[1], it[2], it[3], it[4]) }) }
+        var libraryFilter by rememberSaveable(stateSaver = filterSaver) { mutableStateOf(CatalogFilter(category = Category.GAMES.name)) }
+        // Keep loaded pages alive between sections and discard them when filters change.
+        val libraryPages = remember(repository, libraryScope) {
+            combine(snapshotFlow { libraryFilter }, repository.catalogVersion) { filter, _ -> filter }
+                .flatMapLatest { repository.catalog(it) }.cachedIn(libraryScope)
+        }
         val status by repository.status.collectAsState()
         val compatibility by repository.compatibility.collectAsState()
         val compatibilityDate by repository.compatibilityDatabaseDate.collectAsState()
         val compatibilitySyncing by repository.compatibilitySyncing.collectAsState()
+        LaunchedEffect(status) {
+            val message = status ?: return@LaunchedEffect
+            launch { snackbar.showSnackbar(message, withDismissAction = true) }
+            delay(3500)
+            if (repository.status.value == message) repository.status.value = null
+        }
         BackHandler(enabled = selected != null || section != 0) { if (selected != null) selected = null else section = 0 }
         Surface(modifier = Modifier.fillMaxSize(), color = Ink) {
-        BoxWithConstraints(Modifier.fillMaxSize()) {
+        BoxWithConstraints(Modifier.fillMaxSize().safeDrawingPadding()) {
             val wide = maxWidth >= 700.dp
             Row(Modifier.fillMaxSize()) {
-                if (wide) NavigationRail(containerColor = SurfaceInk) {
-                    Spacer(Modifier.height(28.dp))
+                if (wide) NavigationRail(containerColor = SurfaceInk, modifier = Modifier.width(96.dp)) {
+                    Text("PKGj", Modifier.padding(top = 20.dp, bottom = 24.dp), color = Mint, fontWeight = FontWeight.Bold, fontSize = 20.sp)
                     listOf("Library", "Downloads", "Settings").forEachIndexed { i, label ->
-                        NavigationRailItem(selected = section == i, onClick = { section = i }, icon = {}, label = { Text(label) }, alwaysShowLabel = true)
+                        NavigationRailItem(selected = section == i, onClick = { section = i }, icon = { Icon(NavigationIcons[i], contentDescription = null) }, label = { Text(label) }, alwaysShowLabel = true)
                     }
                 }
                 Column(Modifier.weight(1f)) {
-                    Text(listOf("Library", "Downloads", "Settings")[section], Modifier.padding(20.dp), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                    if (status != null) Text(status!!, Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp), color = Mint)
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(listOf("Library", "Downloads", "Settings")[section], style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.weight(1f))
+                        Text("PS Vita", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                     Box(Modifier.weight(1f)) {
-                        when (section) {
-                            0 -> LibraryScreen(repository, libraryListState, compatibility, onSelect = { selected = it })
+                        screenState.SaveableStateProvider(section) { when (section) {
+                            0 -> LibraryScreen(repository, libraryListState, compatibility, libraryFilter, libraryPages,
+                                onFilter = { libraryFilter = it; libraryScope.launch { libraryListState.scrollToItem(0) } },
+                                onSelect = { selected = it })
                             1 -> DownloadsScreen(repository, onExport, onLicenseExport)
                             else -> SettingsScreen(repository, onImport, onFolder, compatibilityDate, compatibilitySyncing)
-                        }
+                        } }
                     }
                     if (!wide) NavigationBar(containerColor = SurfaceInk) {
                         listOf("Library", "Downloads", "Settings").forEachIndexed { i, label ->
-                            NavigationBarItem(selected = section == i, onClick = { section = i }, icon = {}, label = { Text(label) })
+                            NavigationBarItem(selected = section == i, onClick = { section = i }, icon = { Icon(NavigationIcons[i], contentDescription = null) }, label = { Text(label) })
                         }
                     }
                 }
             }
         }
         }
+        Box(Modifier.fillMaxSize().safeDrawingPadding(), contentAlignment = Alignment.BottomCenter) { SnackbarHost(snackbar) }
         selected?.let { item -> ItemDialog(item, compatibility[item.titleId], onDismiss = { selected = null }, onQueue = { repository.queue(item); selected = null }) }
-    }
-}
-
-@Composable
-private fun FocusCard(onClick: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
-    var focused by remember { mutableStateOf(false) }
-    Card(onClick = onClick, modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp).onFocusChanged { focused = it.isFocused },
-        shape = RoundedCornerShape(16.dp), border = if (focused) BorderStroke(2.dp, Mint) else null,
-        colors = CardDefaults.cardColors(containerColor = SurfaceInk)) { Column(Modifier.padding(16.dp), content = content) }
-}
-
-@Composable
-private fun LibraryScreen(repository: Repository, listState: LazyListState,
-    compatibility: Map<String, CompatibilityReport>, onSelect: (CatalogItem) -> Unit) {
-    var search by remember { mutableStateOf("") }
-    var region by remember { mutableStateOf("All") }
-    var category by remember { mutableStateOf("All") }
-    var sort by remember { mutableStateOf("Title") }
-    var platform by remember { mutableStateOf(CatalogPlatform.PSVITA) }
-    var compatibilityStatus by remember { mutableStateOf("All") }
-    val version by repository.catalogVersion.collectAsState()
-    val syncing by repository.syncing.collectAsState()
-    val categoryOptions = if (platform == CatalogPlatform.PSVITA) Category.entries.filter { it.vita3kRelevant } else Category.entries
-    val filter = remember(search, region, category, sort, platform, compatibilityStatus) {
-        CatalogFilter(search, region, category, sort, platform, compatibilityStatus)
-    }
-    val paging = remember(filter, version) { repository.catalog(filter) }.collectAsLazyPagingItems()
-    LaunchedEffect(filter) { listState.scrollToItem(0) }
-    Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-        OutlinedTextField(search, { search = it }, label = { Text("Search") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        Row(Modifier.horizontalScroll(rememberScrollState()).padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            CatalogPlatform.entries.forEach { option ->
-                FilterChip(selected = platform == option, onClick = {
-                    platform = option
-                    category = "All"
-                    if (option == CatalogPlatform.ALL) compatibilityStatus = "All"
-                }, label = { Text(option.label) })
-            }
-        }
-        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("All", "US", "EU", "JP", "ASIA").forEach { FilterChip(selected = region == it, onClick = { region = it }, label = { Text(it) }) }
-            Spacer(Modifier.width(8.dp))
-            (listOf("All") + categoryOptions.map { it.name }).forEach {
-                FilterChip(selected = category == it, onClick = { category = it }, label = { Text(if (it == "All") it else Category.valueOf(it).label) })
-            }
-            Text("Sort", Modifier.align(Alignment.CenterVertically))
-            listOf("Title", "Size").forEach { FilterChip(selected = sort == it, onClick = { sort = it }, label = { Text(it) }) }
-        }
-        if (platform == CatalogPlatform.PSVITA) {
-            Text("Compatibility", style = MaterialTheme.typography.labelMedium, color = Color(0xFFB7C5D9), modifier = Modifier.padding(top = 6.dp))
-            Row(Modifier.horizontalScroll(rememberScrollState()).padding(top = 4.dp, bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected = compatibilityStatus == "All", onClick = { compatibilityStatus = "All" }, label = { Text("All statuses") })
-                VitaCompatibilityStatuses.forEach { value ->
-                    FilterChip(selected = compatibilityStatus == value, onClick = { compatibilityStatus = value }, label = { Text(value) })
-                }
-            }
-        }
-        if (paging.itemCount == 0 && paging.loadState.refresh !is androidx.paging.LoadState.Loading)
-            Text(if (syncing) "Updating catalog" else "No entries. Check Settings.", Modifier.padding(24.dp))
-        if (paging.loadState.refresh is androidx.paging.LoadState.Loading) CircularProgressIndicator()
-        if (paging.loadState.refresh is androidx.paging.LoadState.Error) Text("Catalog error. Check Settings.", color = MaterialTheme.colorScheme.error)
-        LazyColumn(state = listState, contentPadding = PaddingValues(bottom = 24.dp)) {
-            items(paging.itemCount) { index ->
-                val item = paging[index] ?: return@items
-                FocusCard(onClick = { onSelect(item) }) {
-                    Text(item.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Spacer(Modifier.height(5.dp))
-                    Text(itemDetails(item), color = Color(0xFFB7C5D9), style = MaterialTheme.typography.bodySmall)
-                    if (item.category == Category.GAMES) compatibility[item.titleId]?.let { report ->
-                        CompatibilityPill(report.status)
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -262,24 +225,6 @@ private fun ItemDialog(item: CatalogItem, report: CompatibilityReport?, onDismis
         }
     }, confirmButton = { Button(onClick = onQueue, modifier = Modifier.focusRequester(focus), enabled = queueEnabled) { Text("Queue") } },
         dismissButton = { TextButton(onClick = onDismiss, modifier = Modifier.focusRequester(closeFocus)) { Text("Close") } })
-}
-
-@Composable
-private fun CompatibilityPill(status: String) {
-    val colors = when (status) {
-        "Playable" -> Color(0xFF2E9B59) to Color.White
-        "Ingame +" -> Color(0xFF78A83B) to Color(0xFF10160B)
-        "Ingame -" -> Color(0xFFD1A52E) to Color(0xFF171207)
-        "Menu" -> Color(0xFFE88732) to Color(0xFF1A1007)
-        "Intro" -> Color(0xFFD45C4B) to Color.White
-        "Bootable" -> Color(0xFFB5434A) to Color.White
-        "Nothing" -> Color(0xFF555B66) to Color.White
-        else -> Color(0xFF555B66) to Color.White
-    }
-    Surface(color = colors.first, contentColor = colors.second, shape = CircleShape) {
-        Text(status, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-            style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-    }
 }
 
 @Composable
@@ -342,12 +287,19 @@ private fun SettingsScreen(repository: Repository, onImport: (Category) -> Unit,
     val loading by repository.loading.collectAsState()
     val scope = rememberCoroutineScope()
     var showLicense by remember { mutableStateOf(false) }
+    val uriHandler = LocalUriHandler.current
+    val context = LocalContext.current
+    var folderName by remember(folder) { mutableStateOf<String?>(null) }
+    LaunchedEffect(folder) {
+        folderName = withContext(Dispatchers.IO) {
+            runCatching { folder?.let { DocumentFile.fromTreeUri(context, Uri.parse(it))?.name } }.getOrNull()
+        }
+    }
     Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("Catalog", style = MaterialTheme.typography.titleLarge)
-        Text("Updates automatically. Set a URL or import a TSV to change a category.")
-        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Category.entries.forEach { FilterChip(selected = category == it, onClick = { category = it }, label = { Text(it.label) }) }
-        }
+        FilterMenu("Category", category.name, VitaCategories.map { it.name },
+            label = { Category.valueOf(it).label.removePrefix("Vita ").replaceFirstChar { c -> c.uppercase() } },
+            onSelect = { category = Category.valueOf(it) })
         OutlinedTextField(url, { url = it }, label = { Text("URL") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = { repository.saveUrl(category, url); scope.launch { runCatching { repository.refresh(category) } } }, enabled = !loading) { Text("Update") }
@@ -356,30 +308,43 @@ private fun SettingsScreen(repository: Repository, onImport: (Category) -> Unit,
         }
         HorizontalDivider()
         Text("Export folder", style = MaterialTheme.typography.titleLarge)
-        Text(if (folder == null) "No folder selected" else "New downloads copy here")
+        Text(if (folder == null) "None" else folderName ?: "Selected folder", color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = onFolder) { Text("Choose folder") }
             if (folder != null) TextButton(onClick = { repository.clearExportFolder() }) { Text("Clear folder") }
         }
         HorizontalDivider()
-        Text("Vita3K", style = MaterialTheme.typography.titleLarge)
-        Text("Install .pkg in Vita3K. Select the matching RIF when asked.")
-        Text("PSP, PS1 and PS Mobile are not supported.")
-        HorizontalDivider()
         Text("Compatibility", style = MaterialTheme.typography.titleLarge)
-        Text(compatibilityDate?.let { "Updated $it" } ?: "No compatibility data")
-        Text("Community reports. Not device-specific.")
+        Text(compatibilityDate?.let { "Updated ${it.substringBefore(' ')}" } ?: "No data",
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
         OutlinedButton(onClick = { repository.refreshCompatibility() }, enabled = !compatibilitySyncing) {
             Text(if (compatibilitySyncing) "Updating" else "Update")
         }
-        TextButton(onClick = { showLicense = true }) { Text("App license") }
+        HorizontalDivider()
+        Text("About", style = MaterialTheme.typography.titleLarge)
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("PKGj Android", style = MaterialTheme.typography.titleMedium)
+            Text("Version ${BuildConfig.VERSION_NAME}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        AboutRow("Original project", "PKGj for PS Vita") { uriHandler.openUri("https://github.com/blastrock/pkgj") }
+        AboutRow("Compatibility reports", "Vita3K") { uriHandler.openUri("https://github.com/Vita3K/compatibility") }
+        AboutRow("License", "BSD 2-Clause") { showLicense = true }
     }
     if (showLicense) AlertDialog(onDismissRequest = { showLicense = false }, title = { Text("BSD 2-Clause license") },
         text = { Text(repository.licenseText(), Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) },
         confirmButton = { TextButton(onClick = { showLicense = false }) { Text("Close") } })
 }
 
-private fun sizeLabel(bytes: Long?): String {
+@Composable
+private fun AboutRow(label: String, value: String, onClick: () -> Unit) {
+    Column(Modifier.fillMaxWidth().clickable(role = Role.Button, onClick = onClick).padding(vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, style = MaterialTheme.typography.bodyLarge, color = Mint)
+    }
+}
+
+internal fun sizeLabel(bytes: Long?): String {
     if (bytes == null) return "Unknown size"
     if (bytes <= 0) return "0 B"
     val unit = arrayOf("B", "KB", "MB", "GB", "TB")
@@ -388,7 +353,7 @@ private fun sizeLabel(bytes: Long?): String {
     return String.format(Locale.ROOT, "%.1f %s", value, unit[index])
 }
 
-private fun itemDetails(item: CatalogItem): String = listOfNotNull(
+internal fun itemDetails(item: CatalogItem): String = listOfNotNull(
     item.titleId, item.region, item.category.label, item.size?.let(::sizeLabel)
 ).joinToString("    ")
 

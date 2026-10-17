@@ -4,7 +4,7 @@
 
 This repository contains the Android adaptation only. The Kotlin app lives under `android/`; Gradle wrapper, app sources, unit tests, and BSD license asset are self-contained there. The application ID is `org.pkgj.android.catalog`.
 
-The app has Library, Downloads, and Settings screens. The library defaults to PS Vita content, with an all-platform option and Vita3K report-status filters. Compose renders paged SQLite catalog results. A repository coordinates preferences, catalog refresh/import, downloads, and compatibility reports. WorkManager runs persistent foreground download jobs. Downloads use app-managed storage and can be exported with Android's Storage Access Framework. No all-files permission is requested.
+The app has Library, Downloads, and Settings screens. Settings includes an About section with the build version, original PKGj project, Vita3K compatibility source, and bundled BSD license. The library shows PS Vita content only and opens on Games. Category, region, compatibility and sort choices use compact menus. PSP, PS1 and PS Mobile are excluded from browsing, settings and automatic catalog updates. Their legacy category identifiers remain readable so an upgrade does not break existing download records. Compatibility filters apply to Games; selecting another category clears the status filter. Compose renders paged SQLite catalog results. A repository coordinates preferences, catalog refresh/import, downloads, and compatibility reports. WorkManager runs persistent foreground download jobs. Downloads use app-managed storage and can be exported with Android's Storage Access Framework. No all-files permission is requested.
 
 The TSV parser follows the upstream PKGj column layouts, handles BOM and line endings, skips malformed rows, and stores catalog rows in SQLite. Vita game/demo entries can include an upstream zRIF. When present, the app converts it to a `.rif` alongside a completed PKG; it does not fabricate missing license data. New filenames use `[REGION-TITLEID] - Title vVersion` when those fields exist.
 
@@ -31,10 +31,11 @@ From `android/`, run:
 ./gradlew test lint assembleDebug
 ```
 
-The project uses Gradle 8.9, Android Gradle Plugin 8.7.3, Kotlin 2.0.21, JDK 17, and Android API 35. Unit tests cover TSV parsing, filename handling, compatibility XML and validators, platform/status filtering, download state transitions, HTTP resume validation, and license decoding. The latest local validation passed 14 tests, lint with 0 errors, and `assembleDebug`.
+The project uses Gradle 8.9, Android Gradle Plugin 8.7.3, Kotlin 2.0.21, JDK 17, and Android API 35. Unit tests cover TSV parsing, filename handling, compatibility XML and validators, Vita-only/status filtering, download state transitions, HTTP resume validation, and license decoding. The latest local validation passed 14 tests, lint with 0 errors, and `assembleDebug`.
 
-An earlier debug APK was installed and launched on an AYN Odin 3 running Android 15. The app fetched and parsed the compatibility database; the screenshot in the repository shows colored status pills. No ADB device was connected while validating the new platform and status filters, so this UI change was not smoke-tested on hardware. Controller navigation, long background downloads, process-death recovery, export completion, and Vita3K installation still need the physical checks below.
+The redesigned debug APK was installed and launched on the connected AYN Odin 3 running Android 15. Device screenshots were used to review the library and compatibility menu. The library now uses compact rows with colored status pills, a single filter toolbar, navigation icons, temporary update messages, and retained filters/list position between sections. Opening a filter dismisses the search keyboard. The README screenshot shows the current interface.
 
+Only visual checks were completed on hardware during this update; a full automated filter/navigation pass was not completed. Portrait layout, physical controller buttons, long background downloads, process-death recovery, export completion, and Vita3K installation still need the physical checks below.
 ## Physical-device checklist
 
 1. On an AYN Odin or Android phone, open the library online and confirm catalogs and compatibility labels load. Check search, filters, D-pad/stick focus, A activation, B/back, and dialog focus in portrait and landscape.

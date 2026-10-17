@@ -3,7 +3,7 @@
 An Android port of [PKGj for PS Vita](https://github.com/blastrock/pkgj), rebuilt natively for Android.
 This repository does not include or build the Vita application.
 
-Browse the upstream PKGj catalogs, search and filter titles, queue PKG downloads, and export completed files and available license files through Android's document picker.
+Browse PS Vita catalogs, search and filter titles, queue PKG downloads, and export completed files and available license files through Android's document picker.
 
 Vita3K compatibility reports status pills.
 

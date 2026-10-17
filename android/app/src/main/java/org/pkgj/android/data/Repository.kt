@@ -83,7 +83,7 @@ class Repository private constructor(private val context: Context) {
     }
     fun useUpstreamCatalogs() {
         val edit = prefs.edit()
-        Category.entries.forEach { edit.remove(it.key).putString("source_${it.name}", "remote").remove("refresh_${it.name}") }
+        VitaCategories.forEach { edit.remove(it.key).putString("source_${it.name}", "remote").remove("refresh_${it.name}") }
         edit.apply()
         scope.launch { syncCatalogs() }
     }
@@ -92,7 +92,7 @@ class Repository private constructor(private val context: Context) {
         syncing.value = true
         try {
             val now = System.currentTimeMillis()
-            val pending = Category.entries.filter { category ->
+            val pending = VitaCategories.filter { category ->
                 val source = prefs.getString("source_${category.name}", "remote")
                 val cached = store.count(CatalogFilter(category = category.name)) > 0
                 source == "remote" && url(category).isNotBlank() &&
@@ -126,6 +126,7 @@ class Repository private constructor(private val context: Context) {
                 .putString("compatibilityAssetModified", download.lastModified)
                 .putString("compatibilityDatabaseDate", download.database.updatedAt).apply()
             _compatibility.value = store.compatibilityReports()
+            _catalogVersion.value++
             _compatibilityDatabaseDate.value = download.database.updatedAt
             status.value = "Compatibility updated"
         } catch (e: Exception) {
@@ -174,6 +175,7 @@ class Repository private constructor(private val context: Context) {
     }
 
     fun queue(item: CatalogItem) {
+        require(item.category.vita3kRelevant) { "Only PS Vita content is supported" }
         if (!CatalogParser.usableUrl(item.url)) { status.value = "No download URL"; return }
         val base = DownloadNames.baseName(item)
         var filename = "$base.pkg"
