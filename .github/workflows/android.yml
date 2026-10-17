@@ -1,0 +1,56 @@
+name: Android
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - 'v*'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+      - name: Test, lint, and build debug APK
+        working-directory: android
+        run: ./gradlew test lint assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkgj-android-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pkgj-android-apk
+          path: release
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          apk="release/PKGj-Android-${GITHUB_REF_NAME}.apk"
+          mv release/app-debug.apk "$apk"
+          gh release create "$GITHUB_REF_NAME" "$apk" \
+            --title "PKGj Android ${GITHUB_REF_NAME}" \
+            --generate-notes
