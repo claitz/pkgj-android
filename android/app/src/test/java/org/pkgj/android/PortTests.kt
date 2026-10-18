@@ -100,8 +100,8 @@ class PortTests {
     }
 
     @Test fun filteringEscapesWildcardsAndAppliesRegionCategory() {
-        val (sql, args) = CatalogFilter("  game_%  ", "US", Category.GAMES.name).sqlWhere()
-        assertTrue(sql.contains("title LIKE ?")); assertTrue(sql.contains("region=?")); assertTrue(sql.contains("category=?"))
+        val (sql, args) = CatalogFilter("  game_%  ", setOf("US"), Category.GAMES.name).sqlWhere()
+        assertTrue(sql.contains("title LIKE ?")); assertTrue(sql.contains("region IN (?)")); assertTrue(sql.contains("category=?"))
         assertArrayEquals(arrayOf("%game\\_\\%%", "%game\\_\\%%", "US", "GAMES", "GAMES", "DLCS", "DEMOS", "THEMES"), args)
     }
 
@@ -112,14 +112,75 @@ class PortTests {
     }
 
     @Test fun compatibilityFilterMatchesOneStatusInCompoundReports() {
-        val (reportedSql, reportedArgs) = CatalogFilter(compatibilityStatus = "Ingame +").sqlWhere()
+        val (reportedSql, reportedArgs) = CatalogFilter(compatibilityStatuses = setOf("Ingame +")).sqlWhere()
         assertTrue(reportedSql.contains("EXISTS (SELECT 1 FROM compatibility"))
         assertTrue(reportedSql.contains("instr(' / ' || c.status"))
         assertArrayEquals(arrayOf("GAMES", "DLCS", "DEMOS", "THEMES", "Ingame +"), reportedArgs)
 
-        val (unreportedSql, unreportedArgs) = CatalogFilter(compatibilityStatus = "Unreported").sqlWhere()
+        val (unreportedSql, unreportedArgs) = CatalogFilter(compatibilityStatuses = setOf("Unreported")).sqlWhere()
         assertTrue(unreportedSql.contains("NOT EXISTS (SELECT 1 FROM compatibility"))
         assertArrayEquals(arrayOf("GAMES", "DLCS", "DEMOS", "THEMES"), unreportedArgs)
+    }
+
+    @Test fun combinesMultipleRegionsAndStatusesWithoutInterpolatingValues() {
+        val (sql, args) = CatalogFilter(regions = setOf("US", "EU"),
+            compatibilityStatuses = setOf("Playable", "Ingame +", "Unreported")).sqlWhere()
+        assertTrue(sql.contains("region IN (?,?)"))
+        assertTrue(sql.contains(" OR instr("))
+        assertTrue(sql.contains(" OR NOT EXISTS"))
+        assertFalse(sql.contains("Playable"))
+        assertArrayEquals(arrayOf("EU", "US", "GAMES", "DLCS", "DEMOS", "THEMES", "Ingame +", "Playable"), args)
+        val (anySql, _) = CatalogFilter().sqlWhere()
+        assertFalse(anySql.contains("region IN")); assertFalse(anySql.contains("compatibility c"))
+    }
+
+    @Test fun seekableDestinationResumeAndFullResponseUseTheSameTransport() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(206).setHeader("Content-Range", "bytes 3-5/6")
+                .setHeader("ETag", "v1").setHeader("Accept-Ranges", "bytes").setBody("def"))
+            server.enqueue(MockResponse().setResponseCode(200).setBody("fresh"))
+            val sink = MemoryDestination("abc")
+            DownloadEngine().transfer(server.url("/pkg").toString(), sink, "v1", { null }) { _, _, _, _ -> }
+            assertEquals("abcdef", sink.text())
+            DownloadEngine().transfer(server.url("/pkg").toString(), sink, "v1", { null }) { _, _, _, _ -> }
+            assertEquals("fresh", sink.text())
+            assertTrue(sink.synced)
+        }
+    }
+
+    @Test fun seekableDestinationChecksSpaceAndDoesNotClaimInterruptedCompletion() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("fixture"))
+            server.enqueue(MockResponse().setBody("fixture"))
+            val small = MemoryDestination("").apply { free = 1 }
+            assertThrows(IllegalStateException::class.java) {
+                DownloadEngine().transfer(server.url("/pkg").toString(), small, null, { null }) { _, _, _, _ -> }
+            }
+            assertEquals("", small.text())
+            val paused = MemoryDestination("")
+            assertThrows(DownloadInterrupted::class.java) {
+                DownloadEngine().transfer(server.url("/pkg").toString(), paused, null, { JobState.PAUSED }) { _, _, _, _ -> }
+            }
+            assertFalse(paused.synced)
+        }
+    }
+
+    private class MemoryDestination(text: String) : DownloadDestination {
+        private var bytes = text.toByteArray()
+        private var offset = 0
+        var synced = false
+        var free = Long.MAX_VALUE
+        override val size get() = bytes.size.toLong()
+        override val availableBytes get() = free
+        override fun seek(offset: Long) { this.offset = offset.toInt() }
+        override fun truncate() { bytes = byteArrayOf(); offset = 0 }
+        override fun write(bytes: ByteArray, count: Int) {
+            this.bytes = this.bytes.copyOf(maxOf(this.bytes.size, offset + count))
+            bytes.copyInto(this.bytes, offset, 0, count); offset += count
+        }
+        override fun sync() { synced = true }
+        override fun close() {}
+        fun text() = bytes.toString(Charsets.UTF_8)
     }
 
     @Test fun transitionsDoNotTreatInterruptedAsComplete() {
@@ -139,6 +200,18 @@ class PortTests {
             assertEquals("abcdef", file.readText()); assertEquals(6L, result.bytes)
             val request = server.takeRequest()
             assertEquals("bytes=3-", request.getHeader("Range")); assertEquals("\"a\"", request.getHeader("If-Range"))
+        }
+    }
+
+    @Test fun refusesResumeResponsesThatDoNotReachTheEndOfThePackage() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(206).setHeader("Content-Range", "bytes 3-5/12")
+                .setHeader("ETag", "v1").setBody("def"))
+            val partial = tempFile("abc")
+            assertThrows(IllegalStateException::class.java) {
+                DownloadEngine().transfer(server.url("/pkg").toString(), partial, "v1", { null }) { _, _, _, _ -> }
+            }
+            assertEquals("abc", partial.readText())
         }
     }
 

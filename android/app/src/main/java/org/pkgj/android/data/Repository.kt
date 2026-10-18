@@ -2,6 +2,7 @@ package org.pkgj.android.data
 
 import android.content.Context
 import android.net.Uri
+import android.provider.DocumentsContract
 import androidx.documentfile.provider.DocumentFile
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
@@ -61,7 +62,7 @@ class Repository private constructor(private val context: Context) {
 
     private fun repairDownloadedLicenses() {
         var changed = false
-        store.jobs().filter { it.state == JobState.DOWNLOADED && it.category.vita3kRelevant &&
+        store.jobs().filter { it.folderUri == null && it.state == JobState.DOWNLOADED && it.category.vita3kRelevant &&
             (isLicenseError(it.error) || !licenseFile(it).isFile) }.forEach { job ->
             try {
                 if (ensureLicense(job) != null) {
@@ -177,6 +178,7 @@ class Repository private constructor(private val context: Context) {
     fun queue(item: CatalogItem) {
         require(item.category.vita3kRelevant) { "Only PS Vita content is supported" }
         if (!CatalogParser.usableUrl(item.url)) { status.value = "No download URL"; return }
+        val folder = exportFolder.value ?: run { status.value = "Choose a download folder in Settings"; return }
         val base = DownloadNames.baseName(item)
         var filename = "$base.pkg"
         var copy = 2
@@ -185,7 +187,7 @@ class Repository private constructor(private val context: Context) {
             filename = "$base ($copy).pkg"
             copy++
         }
-        store.addJob(item, filename); refreshJobs(); schedule()
+        store.addJob(item, filename, folder); refreshJobs(); schedule()
     }
     fun licenseFile(job: DownloadJob) = File(downloadsDir, job.filename.removeSuffix(".pkg") + ".rif")
     fun hasCatalogLicense(job: DownloadJob): Boolean = job.category.vita3kRelevant &&
@@ -204,31 +206,110 @@ class Repository private constructor(private val context: Context) {
         } finally { temp.delete() }
         return target
     }
+    @Synchronized
+    fun prepareFolderDownload(job: DownloadJob): DocumentFile {
+        if (store.job(job.id)?.state == JobState.CANCELED) throw DownloadInterrupted(JobState.CANCELED)
+        val tree = DocumentFile.fromTreeUri(context, Uri.parse(job.folderUri ?: error("No download folder")))
+            ?: error("Download folder unavailable. Choose it again in Settings.")
+        require(tree.canWrite()) { "Download folder is not writable. Choose it again in Settings." }
+        job.packageUri?.let { uri ->
+            DocumentFile.fromSingleUri(context, Uri.parse(uri))?.takeIf { it.exists() }?.let { return it }
+        }
+        // Document identifiers can change when a provider renames a file.
+        if (job.transferComplete) {
+            val file = tree.findFile(job.filename) ?: tree.findFile("${job.filename}.${job.id}.part")
+                ?: error("Downloaded file is missing")
+            require(file.length() == job.bytes) { "Downloaded file size changed" }
+            store.update(job.id, packageUri = file.uri.toString())
+            return file
+        }
+        tree.findFile("${job.filename}.${job.id}.part")?.let {
+            store.update(job.id, packageUri = it.uri.toString()); return it
+        }
+        var filename = job.filename
+        var copy = 2
+        while (tree.findFile(filename) != null || tree.findFile(filename.removeSuffix(".pkg") + ".rif") != null) {
+            filename = job.filename.removeSuffix(".pkg") + " (${copy++}).pkg"
+        }
+        if (filename != job.filename) store.setFilename(job.id, filename)
+        val file = tree.createFile("application/octet-stream", "$filename.${job.id}.part")
+            ?: error("Cannot create download file")
+        store.update(job.id, packageUri = file.uri.toString())
+        return file
+    }
+
+    fun openFolderDownload(file: DocumentFile) = DocumentDestination(context.contentResolver, file.uri)
+
+    /** Called only after the transport has persisted successful completion. */
+    @Synchronized
+    fun finishFolderDownload(job: DownloadJob): String? {
+        require(job.transferComplete) { "Download is incomplete" }
+        val pkg = prepareFolderDownload(job)
+        require(pkg.length() == job.bytes) { "Downloaded file size changed" }
+        if (pkg.name != job.filename) {
+            val uri = try { DocumentsContract.renameDocument(context.contentResolver, pkg.uri, job.filename) }
+                catch (e: Exception) { throw java.io.IOException("Could not rename downloaded PKG", e) }
+            store.update(job.id, packageUri = (uri ?: error("Could not rename downloaded PKG")).toString())
+        }
+        val zrif = job.zrif.ifBlank { store.catalogZrif(job.category, job.contentId) }
+        if (zrif.isBlank()) return "No RIF"
+        val bytes = try { LicenseCodec.decode(zrif, job.contentId) } catch (_: IllegalArgumentException) { return "Invalid RIF" }
+        val tree = DocumentFile.fromTreeUri(context, Uri.parse(job.folderUri!!)) ?: error("Download folder unavailable")
+        val name = job.filename.removeSuffix(".pkg") + ".rif"
+        val rif = job.licenseUri?.let { DocumentFile.fromSingleUri(context, Uri.parse(it)) }?.takeIf { it.exists() }
+            ?: (if (job.licenseUri != null) tree.findFile(name) else null)
+            ?: tree.findFile("$name.${job.id}.part")
+            ?: tree.createFile("application/octet-stream", "$name.${job.id}.part") ?: error("Cannot create RIF")
+        store.update(job.id, licenseUri = rif.uri.toString())
+        context.contentResolver.openOutputStream(rif.uri, "wt")?.use { it.write(bytes) } ?: error("Cannot save RIF")
+        val rifUri = if (rif.name == name) rif.uri else try {
+            DocumentsContract.renameDocument(context.contentResolver, rif.uri, name) ?: error("Could not rename RIF")
+        } catch (e: Exception) { throw java.io.IOException("Could not rename RIF", e) }
+        store.update(job.id, licenseUri = rifUri.toString(), licenseExported = true)
+        return null
+    }
+
+    @Synchronized
+    fun discardDownloadFiles(job: DownloadJob) {
+        val current = store.job(job.id) ?: job
+        if (current.folderUri != null) {
+            val tree = DocumentFile.fromTreeUri(context, Uri.parse(current.folderUri)) ?: error("Download folder unavailable")
+            require(tree.canWrite()) { "Cannot delete files. Re-select the original download folder in Settings." }
+            val names = listOf(current.filename, current.filename.removeSuffix(".pkg") + ".rif")
+            listOf(current.packageUri, current.licenseUri).forEachIndexed { index, uri ->
+                val document = uri?.let { DocumentFile.fromSingleUri(context, Uri.parse(it)) }?.takeIf { it.exists() }
+                    ?: tree.findFile("${names[index]}.${current.id}.part")
+                    ?: if (current.transferComplete && uri != null) tree.findFile(names[index]) else null
+                if (document != null) require(document.delete()) { "Could not delete ${document.name}" }
+            }
+        } else {
+            val file = File(downloadsDir, current.filename)
+            if (file.exists()) require(file.delete()) { "Could not delete PKG" }
+            val license = licenseFile(current)
+            if (license.exists()) require(license.delete()) { "Could not delete RIF" }
+        }
+    }
+
     fun action(job: DownloadJob, action: JobState) {
-        if (!JobTransitions.canMove(job.state, action)) return
+        if (!store.transition(job.id, action)) return
         if (action == JobState.CANCELED) {
-            File(downloadsDir, job.filename).delete()
-            licenseFile(job).delete()
-            store.update(job.id, state = action, bytes = 0, speed = 0)
-        } else { store.update(job.id, state = action, speed = 0); if (action == JobState.QUEUED) schedule() }
+            runCatching { discardDownloadFiles(store.job(job.id) ?: job) }
+                .onSuccess { store.update(job.id, bytes = 0, transferComplete = false, exported = false, licenseExported = false) }
+                .onFailure { store.update(job.id, error = it.message ?: "Could not delete files") }
+        } else if (action == JobState.QUEUED) schedule()
         refreshJobs()
     }
-    fun delete(job: DownloadJob) {
-        if (job.state == JobState.RUNNING) { action(job, JobState.CANCELED); return }
-        File(downloadsDir, job.filename).delete()
-        licenseFile(job).delete()
-        store.update(job.id, state = JobState.CANCELED, bytes = 0, speed = 0)
-        refreshJobs()
-    }
+    fun delete(job: DownloadJob) = action(job, JobState.CANCELED)
     fun deleteCompleted(job: DownloadJob) {
         if (store.job(job.id)?.state != JobState.DOWNLOADED) return
-        val file = File(downloadsDir, job.filename)
-        val license = licenseFile(job)
-        if (license.exists() && !license.delete()) { status.value = "Could not delete local license"; return }
-        if (file.exists() && !file.delete()) { status.value = "Could not delete local file"; return }
-        store.removeJob(job.id); refreshJobs()
-        status.value = "Deleted"
+        scope.launch {
+            runCatching { discardDownloadFiles(job) }
+                .onSuccess { store.removeJob(job.id); status.value = "Deleted" }
+                .onFailure { status.value = it.message ?: "Could not delete files" }
+            refreshJobs()
+        }
     }
+
     fun setExportFolder(uri: Uri) {
         context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
         prefs.edit().putString("exportFolder", uri.toString()).apply(); exportFolder.value = uri.toString()
@@ -237,16 +318,22 @@ class Repository private constructor(private val context: Context) {
     private fun copyToUri(file: File, uri: Uri) {
         context.contentResolver.openOutputStream(uri, "wt")!!.use { out -> file.inputStream().use { it.copyTo(out) } }
     }
+    private fun copyDocument(source: String, destination: Uri) {
+        require(Uri.parse(source) != destination) { "Choose a different file" }
+        context.contentResolver.openInputStream(Uri.parse(source))?.use { input ->
+            context.contentResolver.openOutputStream(destination, "wt")?.use { input.copyTo(it) } ?: error("Cannot write selected file")
+        } ?: error("Download is unavailable")
+    }
     suspend fun exportTo(job: DownloadJob, uri: Uri) = withContext(Dispatchers.IO) {
-        val file = File(downloadsDir, job.filename)
-        require(job.state == JobState.DOWNLOADED && file.isFile) { "Download is unavailable" }
-        copyToUri(file, uri)
+        require(job.state == JobState.DOWNLOADED) { "Download is unavailable" }
+        if (job.folderUri == null) copyToUri(File(downloadsDir, job.filename), uri)
+        else copyDocument(job.packageUri ?: error("Download is unavailable"), uri)
         store.update(job.id, exported = true); refreshJobs()
     }
     suspend fun exportLicenseTo(job: DownloadJob, uri: Uri) = withContext(Dispatchers.IO) {
         require(job.state == JobState.DOWNLOADED) { "Download is unavailable" }
-        val file = ensureLicense(job) ?: error("This catalog entry has no license")
-        copyToUri(file, uri)
+        if (job.folderUri == null) copyToUri(ensureLicense(job) ?: error("No RIF"), uri)
+        else copyDocument(job.licenseUri ?: error("No RIF"), uri)
         store.update(job.id, licenseExported = true, error = ""); refreshJobs()
     }
     suspend fun exportToFolder(job: DownloadJob): Boolean = withContext(Dispatchers.IO) {
@@ -264,8 +351,10 @@ class Repository private constructor(private val context: Context) {
                 rifTarget = tree.createFile("application/octet-stream", rif.name) ?: error("Cannot create license file")
                 copyToUri(rif, rifTarget.uri)
             }
-            store.update(job.id, exported = true, licenseExported = if (rif != null) true else null,
-                error = if (rif != null) "" else null); refreshJobs()
+            store.update(job.id, folderUri = folder, packageUri = pkgTarget.uri.toString(), licenseUri = rifTarget?.uri?.toString(),
+                transferComplete = true, exported = true, licenseExported = rif != null, error = if (rif != null) "" else "No RIF")
+            pkg.delete(); rif?.delete()
+            refreshJobs()
             true
         } catch (e: Exception) { rifTarget?.delete(); pkgTarget.delete(); throw e }
     }

@@ -80,10 +80,10 @@ object CatalogParser {
 
 data class CatalogFilter(
     val search: String = "",
-    val region: String = "All",
+    val regions: Set<String> = emptySet(),
     val category: String = "All",
     val sort: String = "Title",
-    val compatibilityStatus: String = "All"
+    val compatibilityStatuses: Set<String> = emptySet()
 )
 
 fun CatalogFilter.sqlWhere(): Pair<String, Array<String>> {
@@ -93,17 +93,24 @@ fun CatalogFilter.sqlWhere(): Pair<String, Array<String>> {
         val q = "%" + search.trim().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         args += q; args += q
     }
-    if (region != "All") { parts += "region=?"; args += region }
+    if (regions.isNotEmpty()) {
+        parts += "region IN (${regions.joinToString(",") { "?" }})"
+        args += regions.sorted()
+    }
     if (category != "All") { parts += "category=?"; args += category }
     parts += "category IN (${VitaCategories.joinToString(",") { "?" }})"
     args += VitaCategories.map { it.name }
-    when (compatibilityStatus) {
-        "All" -> Unit
-        "Unreported" -> parts += "NOT EXISTS (SELECT 1 FROM compatibility c WHERE c.titleid=catalog.titleid)"
-        else -> {
-            parts += "EXISTS (SELECT 1 FROM compatibility c WHERE c.titleid=catalog.titleid AND instr(' / ' || c.status || ' / ', ' / ' || ? || ' / ') > 0)"
-            args += compatibilityStatus
+    if (compatibilityStatuses.isNotEmpty()) {
+        val alternatives = mutableListOf<String>()
+        val reported = (compatibilityStatuses - "Unreported").sorted()
+        if (reported.isNotEmpty()) {
+            alternatives += "EXISTS (SELECT 1 FROM compatibility c WHERE c.titleid=catalog.titleid AND (" +
+                reported.joinToString(" OR ") { "instr(' / ' || c.status || ' / ', ' / ' || ? || ' / ') > 0" } + "))"
+            args += reported
         }
+        if ("Unreported" in compatibilityStatuses)
+            alternatives += "NOT EXISTS (SELECT 1 FROM compatibility c WHERE c.titleid=catalog.titleid)"
+        parts += alternatives.joinToString(" OR ", "(", ")")
     }
     return (if (parts.isEmpty()) "" else "WHERE " + parts.joinToString(" AND ")) to args.toTypedArray()
 }

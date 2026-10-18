@@ -11,7 +11,8 @@ enum class JobState { QUEUED, RUNNING, PAUSED, FAILED, CANCELED, DOWNLOADED }
 data class DownloadJob(val id: Long, val category: Category, val contentId: String, val title: String,
     val url: String, val filename: String, val state: JobState, val bytes: Long, val total: Long?,
     val etag: String?, val error: String?, val speed: Long, val exported: Boolean, val zrif: String = "",
-    val licenseExported: Boolean = false)
+    val licenseExported: Boolean = false, val folderUri: String? = null,
+    val packageUri: String? = null, val licenseUri: String? = null, val transferComplete: Boolean = false)
 
 object JobTransitions {
     fun canMove(from: JobState, to: JobState) = when (from) {
@@ -26,16 +27,41 @@ object JobTransitions {
 
 class DownloadInterrupted(val requested: JobState) : Exception()
 
+/** Seekable destination shared by private files and Android document providers. */
+interface DownloadDestination : java.io.Closeable {
+    val size: Long
+    val availableBytes: Long?
+    fun seek(offset: Long)
+    fun truncate()
+    fun write(bytes: ByteArray, count: Int)
+    fun sync()
+}
+
+private class FileDestination(private val target: File) : DownloadDestination {
+    private val file = RandomAccessFile(target, "rw")
+    override val size get() = file.length()
+    override val availableBytes get() = target.parentFile?.usableSpace
+    override fun seek(offset: Long) = file.seek(offset)
+    override fun truncate() { file.setLength(0); file.seek(0) }
+    override fun write(bytes: ByteArray, count: Int) = file.write(bytes, 0, count)
+    override fun sync() = file.fd.sync()
+    override fun close() = file.close()
+}
+
 /** HTTP transport with explicit resume validation. No TLS overrides are installed. */
 class DownloadEngine {
     data class Result(val bytes: Long, val total: Long?, val etag: String?, val rangeSupported: Boolean)
 
     fun transfer(url: String, target: File, oldEtag: String?,
         control: () -> JobState?, progress: (Long, Long?, String?, Long) -> Unit): Result {
+        (target.parentFile ?: error("No download directory")).mkdirs()
+        return FileDestination(target).use { transfer(url, it, oldEtag, control, progress) }
+    }
+
+    fun transfer(url: String, target: DownloadDestination, oldEtag: String?,
+        control: () -> JobState?, progress: (Long, Long?, String?, Long) -> Unit): Result {
         require(url.startsWith("https://") || url.startsWith("http://")) { "Unsupported URL scheme" }
-        val directory = target.parentFile ?: error("No download directory")
-        directory.mkdirs()
-        val existing = if (target.exists()) target.length() else 0L
+        val existing = target.size
         var current = URL(url)
         var connection: HttpURLConnection? = null
         for (redirect in 0..5) {
@@ -62,7 +88,7 @@ class DownloadEngine {
             val code = c.responseCode
             if (code == 416 && existing > 0 && oldEtag != null) {
                 c.disconnect()
-                RandomAccessFile(target, "rw").use { it.setLength(0) }
+                target.truncate()
                 return transfer(url, target, null, control, progress)
             }
             val resume = existing > 0 && oldEtag != null && code == 206
@@ -78,12 +104,12 @@ class DownloadEngine {
                 if (length != match.groupValues[2].toLong() - existing + 1) throw IllegalStateException("Resume length mismatch")
             }
             val total = length?.plus(start)
-            if (total != null && directory.usableSpace < total - start + 16L * 1024 * 1024) throw IllegalStateException("Not enough free space")
+            if (total != null && target.availableBytes?.let { it < total - start + 16L * 1024 * 1024 } == true) throw IllegalStateException("Not enough free space")
             val etag = c.getHeaderField("ETag")?.takeIf { it.isNotBlank() }
             val rangeSupported = c.getHeaderField("Accept-Ranges")?.equals("bytes", true) == true && etag != null
             val resumeEtag = if (rangeSupported) etag else null
-            RandomAccessFile(target, "rw").use { file ->
-                if (resume) file.seek(existing) else file.setLength(0)
+            run {
+                if (resume) target.seek(existing) else target.truncate()
                 var count = start
                 progress(count, total, resumeEtag, 0)
                 var tick = System.nanoTime(); var last = count
@@ -96,8 +122,8 @@ class DownloadEngine {
                         if (n == 0) {
                             continue
                         }
-                        if (directory.usableSpace < n + 1024L * 1024) throw IllegalStateException("Not enough free space")
-                        file.write(buffer, 0, n)
+                        if (target.availableBytes?.let { it < n + 1024L * 1024 } == true) throw IllegalStateException("Not enough free space")
+                        target.write(buffer, n)
                         count += n
                         val now = System.nanoTime()
                         if (now - tick > 250_000_000) {
@@ -106,7 +132,7 @@ class DownloadEngine {
                         }
                     }
                 }
-                file.fd.sync()
+                target.sync()
                 if (total != null && count != total) throw IllegalStateException("Truncated transfer: $count of $total bytes")
                 progress(count, total, resumeEtag, 0)
                 return Result(count, total, resumeEtag, rangeSupported)
@@ -120,7 +146,7 @@ class DownloadEngine {
             val start = m.groupValues[1].toLongOrNull() ?: return false
             val end = m.groupValues[2].toLongOrNull() ?: return false
             val total = m.groupValues[3].toLongOrNull()
-            return start == offset && end >= start && (total == null || end < total)
+            return start == offset && end >= start && total != null && end == total - 1
         }
         fun safeFilename(titleId: String, id: Long): String = "${titleId.replace(Regex("[^A-Za-z0-9_-]"), "_").take(20)}-$id.pkg"
     }

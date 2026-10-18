@@ -3,11 +3,11 @@
 An Android port of [PKGj for PS Vita](https://github.com/blastrock/pkgj), rebuilt natively for Android.
 This repository does not include or build the Vita application.
 
-Browse PS Vita catalogs, search and filter titles, queue PKG downloads, and export completed files and available license files through Android's document picker.
+Browse PS Vita catalogs, search and filter titles, queue PKG downloads, and save packages and available RIF files to a folder you choose.
 
 Vita3K compatibility reports status pills.
 
-![PKGj Android Catalog on an AYN Odin](docs/screenshot.png)
+![PKGj Android Catalog in landscape](docs/screenshot.png)
 
 ## Build on Linux
 
@@ -32,11 +32,15 @@ To launch it from ADB:
 adb shell am start -n org.pkgj.android.catalog/org.pkgj.android.MainActivity
 ```
 
+## Controls
+
+D-pad or left stick to navigate, A to select, B to go back. L1/R1 switch tabs. L2/R2 or the right stick page through lists; hold a trigger to scroll faster.
+
 ## Notes
 
 - Catalogs and compatibility reports are fetched from their public upstream sources and cached for offline use. Custom catalog URLs and local TSV imports are supported.
 - Compatibility labels are community reports and may not match the current Vita3K Android build or device.
-- Downloaded files remain in app-managed storage until exported or deleted. Vita3K handles installation and license selection.
+- New downloads go directly to the selected folder. Vita3K handles installation and license selection. Older downloads stored inside the app can be moved with **Save to folder**.
 - No game files, credentials, or license material are bundled.
 
 See [docs/android-port.md](docs/android-port.md) for architecture, catalog formats, Vita3K integration findings, limitations, and the device test checklist.
