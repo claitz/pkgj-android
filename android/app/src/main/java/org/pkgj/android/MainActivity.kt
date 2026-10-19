@@ -67,7 +67,7 @@ import java.util.Locale
 class MainActivity : ComponentActivity() {
     private val repository by lazy { Repository.get(this) }
     private var importCategory = Category.GAMES
-    private var pendingDownload: CatalogItem? = null
+    private var pendingDownload: List<CatalogItem>? = null
     private var exportJob: DownloadJob? = null
     private var licenseExportJob: DownloadJob? = null
     private val importPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -92,8 +92,8 @@ class MainActivity : ComponentActivity() {
         val job = licenseExportJob
         if (uri != null && job != null) lifecycleScope.launch {
             runCatching { repository.exportLicenseTo(job, uri) }
-                .onSuccess { repository.status.value = "RIF exported" }
-                .onFailure { repository.status.value = "RIF export failed: ${it.message}" }
+                .onSuccess { repository.status.value = "${job.licenseLabel} exported" }
+                .onFailure { repository.status.value = "${job.licenseLabel} export failed: ${it.message}" }
         }
         licenseExportJob = null
     }
@@ -129,7 +129,7 @@ internal val Mint = Color(0xFF74D5B5)
 @OptIn(ExperimentalCoroutinesApi::class)
 @Composable
 private fun CatalogApp(repository: Repository, onMotion: (MotionEvent, View) -> Boolean, onStopMotion: () -> Unit,
-    triggerHeld: (Int) -> Boolean, onImport: (Category) -> Unit, onFolder: () -> Unit, onQueue: (CatalogItem) -> Unit,
+    triggerHeld: (Int) -> Boolean, onImport: (Category) -> Unit, onFolder: () -> Unit, onQueue: (List<CatalogItem>) -> Unit,
     onExport: (DownloadJob) -> Unit, onLicenseExport: (DownloadJob) -> Unit) {
     val colors = darkColorScheme(primary = Mint, onPrimary = Ink, secondary = Mint, secondaryContainer = Color(0xFF284439), onSecondaryContainer = Mint, background = Ink, onBackground = Color(0xFFE6E9EE), surface = SurfaceInk, onSurface = Color(0xFFE6E9EE), surfaceVariant = SurfaceInk, onSurfaceVariant = Color(0xFFA3ADB9), outline = Color(0xFF414B57), surfaceContainer = SurfaceInk, surfaceContainerHigh = Color(0xFF222A34), surfaceContainerHighest = Color(0xFF2B3540), surfaceContainerLow = Color(0xFF161C23), outlineVariant = Color(0xFF414B57))
     MaterialTheme(colorScheme = colors) {
@@ -147,8 +147,8 @@ private fun CatalogApp(repository: Repository, onMotion: (MotionEvent, View) -> 
         val libraryListState = rememberLazyListState()
         val libraryScope = rememberCoroutineScope()
         val filterSaver = remember { listSaver<CatalogFilter, String>(
-            save = { listOf(it.search, it.regions.sorted().joinToString("|"), it.category, it.sort, it.compatibilityStatuses.sorted().joinToString("|")) },
-            restore = { CatalogFilter(it[0], it[1].split('|').filter { value -> value.isNotEmpty() && value != "All" }.toSet(), it[2], it[3], it[4].split('|').filter { value -> value.isNotEmpty() && value != "All" }.toSet()) }) }
+            save = { listOf(it.search, it.regions.sorted().joinToString("|"), it.category, it.sort, it.compatibilityStatuses.sorted().joinToString("|"), it.platform.name) },
+            restore = { CatalogFilter(it[0], it[1].split('|').filter { value -> value.isNotEmpty() && value != "All" }.toSet(), it[2], it[3], it[4].split('|').filter { value -> value.isNotEmpty() && value != "All" }.toSet(), it.getOrNull(5)?.let(Platform::valueOf) ?: Platform.VITA) }) }
         var libraryFilter by rememberSaveable(stateSaver = filterSaver) { mutableStateOf(CatalogFilter(category = Category.GAMES.name)) }
         // Keep loaded pages alive between sections and discard them when filters change.
         val libraryPages = remember(repository, libraryScope) {
@@ -247,7 +247,7 @@ private fun DownloadsScreen(repository: Repository, onExport: (DownloadJob) -> U
                         if (job.state == JobState.DOWNLOADED) {
                             if (job.folderUri == null) {
                             OutlinedButton(modifier = Modifier.controllerFocus(), onClick = { onExport(job) }) { Text("Export PKG") }
-                            if (repository.hasCatalogLicense(job)) OutlinedButton(modifier = Modifier.controllerFocus(), onClick = { onLicenseExport(job) }) { Text("Export RIF") }
+                            if (repository.hasCatalogLicense(job)) OutlinedButton(modifier = Modifier.controllerFocus(), onClick = { onLicenseExport(job) }) { Text("Export ${job.licenseLabel}") }
                             if (folder != null) OutlinedButton(modifier = Modifier.controllerFocus(), onClick = {
                                 scope.launch {
                                     runCatching { repository.exportToFolder(job) }
@@ -268,7 +268,7 @@ private fun DownloadsScreen(repository: Repository, onExport: (DownloadJob) -> U
                         Column(Modifier.weight(1f)) {
                             Text(job.displayTitle, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Text(if (job.state == JobState.RUNNING && job.updateCheck == "PENDING") "Checking update" else if (job.state == JobState.DOWNLOADED && job.folderUri != null) "Saved" else job.state.name.lowercase().replaceFirstChar { it.uppercase() }, color = Mint, style = MaterialTheme.typography.bodySmall)
+                                Text("${job.category.platform.label}    ${downloadStateLabel(job)}", color = Mint, style = MaterialTheme.typography.bodySmall)
                                 if (job.state == JobState.RUNNING || job.state == JobState.PAUSED)
                                     Text("${sizeLabel(job.bytes)} / ${sizeLabel(job.total)}    ${sizeLabel(job.speed)}/s",
                                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -277,11 +277,11 @@ private fun DownloadsScreen(repository: Repository, onExport: (DownloadJob) -> U
                         Box(Modifier.widthIn(max = 380.dp)) { actions() }
                     } else {
                         Text(job.displayTitle, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                        Text(if (job.state == JobState.RUNNING && job.updateCheck == "PENDING") "Checking update" else if (job.state == JobState.DOWNLOADED && job.folderUri != null) "Saved" else job.state.name.lowercase().replaceFirstChar { it.uppercase() }, color = Mint, style = MaterialTheme.typography.bodySmall)
+                        Text("${job.category.platform.label}    ${downloadStateLabel(job)}", color = Mint, style = MaterialTheme.typography.bodySmall)
                     }
                     if (job.folderUri == null && (job.exported || job.licenseExported)) Text(
                         listOfNotNull(if (job.exported) "PKG exported" else null,
-                            if (job.licenseExported) "RIF exported" else null).joinToString("    "),
+                            if (job.licenseExported) "${job.licenseLabel} exported" else null).joinToString("    "),
                         color = Color(0xFFB7C5D9), style = MaterialTheme.typography.bodySmall)
                     if (job.state == JobState.RUNNING || job.state == JobState.PAUSED) {
                         LinearProgressIndicator(progress = { if (job.total != null && job.total > 0) (job.bytes.toFloat() / job.total).coerceIn(0f, 1f) else 0f }, modifier = Modifier.fillMaxWidth())
@@ -297,6 +297,12 @@ private fun DownloadsScreen(repository: Repository, onExport: (DownloadJob) -> U
     }
     deleteTarget?.let { job -> DeleteFilesDialog(job.displayTitle,
         onDelete = { repository.deleteCompleted(job); deleteTarget = null }, onDismiss = { deleteTarget = null }) }
+}
+
+private fun downloadStateLabel(job: DownloadJob): String = when {
+    job.state == JobState.RUNNING && job.updateCheck == "PENDING" -> "Checking update"
+    job.state == JobState.DOWNLOADED && job.folderUri != null -> "Saved"
+    else -> job.state.name.lowercase().replaceFirstChar { it.uppercase() }
 }
 
 @Composable
@@ -333,9 +339,13 @@ private fun SettingsScreen(repository: Repository, onImport: (Category) -> Unit,
         val wide = maxWidth >= 700.dp
         val catalog: @Composable () -> Unit = {
             Text("Catalog", style = MaterialTheme.typography.titleMedium)
-            FilterMenu("Category", category.name, VitaCategories.map { it.name },
-                label = { Category.valueOf(it).label.removePrefix("Vita ").replaceFirstChar { c -> c.uppercase() } },
+            Row(verticalAlignment = Alignment.CenterVertically) {
+            FilterMenu("Platform", category.platform.name, Platform.entries.map { it.name }, label = { Platform.valueOf(it).label },
+                onSelect = { category = Platform.valueOf(it).categories().first() })
+            FilterMenu("Category", category.name, category.platform.categories().map { it.name },
+                label = { Category.valueOf(it).contentLabel },
                 onSelect = { category = Category.valueOf(it) }, modifier = Modifier.focusRequester(categoryFocus))
+            }
             OutlinedTextField(url, { url = it }, label = { Text("URL") }, modifier = Modifier.fillMaxWidth()
                 .onFocusChanged { editingUrl = it.hasFocus }.onPreviewKeyEvent { event ->
                     val key = event.nativeKeyEvent
@@ -349,7 +359,7 @@ private fun SettingsScreen(repository: Repository, onImport: (Category) -> Unit,
                 }, singleLine = true)
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(modifier = Modifier.controllerFocus(), onClick = { repository.saveUrl(category, url); scope.launch { runCatching { repository.refresh(category) } } }, enabled = !loading) { Text("Update") }
-                OutlinedButton(modifier = Modifier.controllerFocus(), onClick = { onImport(category) }, enabled = !loading) { Text("Import TSV") }
+                OutlinedButton(modifier = Modifier.controllerFocus(), onClick = { onImport(category) }, enabled = !loading) { Text("Import") }
                 OutlinedButton(modifier = Modifier.controllerFocus(), onClick = { repository.useUpstreamCatalogs() }) { Text("Reset URLs") }
             }
         }

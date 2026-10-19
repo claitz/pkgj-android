@@ -71,8 +71,8 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     if (current.state != JobState.RUNNING) throw DownloadInterrupted(current.state)
                     val licenseError = if (current.folderUri != null) repository.finishFolderDownload(current)
                         else if (current.needsLicense) try {
-                            if (repository.ensureLicense(current) == null) "No RIF" else null
-                        } catch (_: IllegalArgumentException) { "Invalid RIF" } else null
+                            if (repository.ensureLicense(current) == null) "No ${current.licenseLabel}" else null
+                        } catch (_: IllegalArgumentException) { "Invalid ${current.licenseLabel}" } else null
                     if (store.job(job.id)?.state != JobState.RUNNING) throw DownloadInterrupted(store.job(job.id)?.state ?: JobState.CANCELED)
                     if (!store.completeJob(job.id, licenseError ?: "", current.folderUri != null))
                         throw DownloadInterrupted(store.job(job.id)?.state ?: JobState.CANCELED)

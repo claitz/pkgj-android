@@ -53,7 +53,7 @@ import org.pkgj.android.compatibility.CompatibilityReport
 import org.pkgj.android.data.Repository
 
 private val CompatibilityOptions = listOf("All", "Playable", "Ingame +", "Ingame -", "Menu", "Intro", "Bootable", "Nothing", "Unreported")
-private val CategoryNames = mapOf("All" to "All content", "GAMES" to "Games", "DLCS" to "DLC", "DEMOS" to "Demos", "THEMES" to "Themes")
+private val CategoryNames = mapOf("All" to "All content") + Category.entries.associate { it.name to it.contentLabel }
 
 @Composable
 internal fun LibraryScreen(repository: Repository, listState: LazyListState,
@@ -154,10 +154,15 @@ internal fun LibraryScreen(repository: Repository, listState: LazyListState,
             val filters: @Composable (Modifier) -> Unit = { filterModifier ->
                 Row(filterModifier.horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    FilterMenu("Category", category, listOf("GAMES", "DLCS", "DEMOS", "THEMES", "All"),
+                    FilterMenu("Platform", filter.platform.name, Platform.entries.map { it.name }, label = { Platform.valueOf(it).label },
+                        onSelect = { name ->
+                            val platform = Platform.valueOf(name)
+                            onFilter(filter.copy(platform = platform, category = platform.categories().first().name, compatibilityStatuses = emptySet()))
+                        }, modifier = Modifier.focusProperties { up = searchFocus; if (listReady && paging.itemCount > 0) down = listFocus }.then(filterNavigation))
+                    FilterMenu("Category", category, filter.platform.categories().map { it.name } + "All",
                         label = { CategoryNames.getValue(it) }, onSelect = { onFilter(filter.copy(category = it, compatibilityStatuses = emptySet())) },
                         modifier = Modifier.focusRequester(categoryFocus).focusProperties { up = searchFocus; if (listReady && paging.itemCount > 0) down = listFocus }.then(filterNavigation))
-                    MultiFilterMenu("Region", regions, listOf("US", "EU", "JP", "ASIA"), "All regions",
+                    MultiFilterMenu("Region", regions, listOf("US", "EU", "JP", "ASIA", "INT"), "All regions",
                         modifier = Modifier.focusProperties { up = searchFocus; if (listReady && paging.itemCount > 0) down = listFocus }.then(filterNavigation),
                         onSelect = { onFilter(filter.copy(regions = it)) })
                     if (category == Category.GAMES.name) MultiFilterMenu("Compatibility", statuses, CompatibilityOptions.filter { it != "All" }, "Any status",
@@ -169,7 +174,7 @@ internal fun LibraryScreen(repository: Repository, listState: LazyListState,
                 }
             }
             if (maxWidth >= 760.dp) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                field(Modifier.weight(1f)); filters(Modifier.weight(1.8f))
+                field(Modifier.weight(1f)); filters(Modifier.weight(2.4f))
             } else Column { field(Modifier.fillMaxWidth()); filters(Modifier.fillMaxWidth()) }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .35f))

@@ -26,7 +26,7 @@ import org.pkgj.android.catalog.Category
 import org.pkgj.android.compatibility.CompatibilityReport
 
 @Composable
-internal fun ItemDialog(item: CatalogItem, report: CompatibilityReport?, repository: org.pkgj.android.data.Repository, onDismiss: () -> Unit, onQueue: (CatalogItem) -> Unit) {
+internal fun ItemDialog(item: CatalogItem, report: CompatibilityReport?, repository: org.pkgj.android.data.Repository, onDismiss: () -> Unit, onQueue: (List<CatalogItem>) -> Unit) {
     val primary = remember { FocusRequester() }
     val close = remember { FocusRequester() }
     val scroll = rememberScrollState()
@@ -66,9 +66,9 @@ internal fun ItemDialog(item: CatalogItem, report: CompatibilityReport?, reposit
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                 DetailValue("Region", item.region, Modifier.weight(1f))
                                 DetailValue("Size", item.size?.let(::sizeLabel) ?: "Unknown", Modifier.weight(1f))
-                                DetailValue("Category", item.category.label.removePrefix("Vita ").replaceFirstChar { it.uppercase() }, Modifier.weight(1f))
+                                DetailValue("Category", item.category.contentLabel, Modifier.weight(1f))
                                 if (item.version.isNotEmpty()) DetailValue("Version", item.version, Modifier.weight(.65f))
-                                DetailValue("License", if (item.zrif.isNotEmpty()) "RIF available" else "No RIF", Modifier.weight(1.2f))
+                                DetailValue(if (item.category.hasLicense) "License" else "Format", licenseSummary(item), Modifier.weight(1.2f))
                             }
                         } else {
                             Text(item.titleId, color = Mint, style = MaterialTheme.typography.labelLarge)
@@ -79,11 +79,11 @@ internal fun ItemDialog(item: CatalogItem, report: CompatibilityReport?, reposit
                                 DetailValue("Size", item.size?.let(::sizeLabel) ?: "Unknown", Modifier.weight(1f))
                             }
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-                                DetailValue("Category", item.category.label.removePrefix("Vita ").replaceFirstChar { it.uppercase() }, Modifier.weight(1f))
+                                DetailValue("Category", item.category.contentLabel, Modifier.weight(1f))
                                 if (item.version.isNotEmpty()) DetailValue("Version", item.version, Modifier.weight(1f))
-                                else DetailValue("License", if (item.zrif.isNotEmpty()) "RIF available" else "No RIF", Modifier.weight(1f))
+                                else DetailValue(if (item.category.hasLicense) "License" else "Format", licenseSummary(item), Modifier.weight(1f))
                             }
-                            if (item.version.isNotEmpty()) DetailValue("License", if (item.zrif.isNotEmpty()) "RIF available" else "No RIF")
+                            if (item.version.isNotEmpty()) DetailValue(if (item.category.hasLicense) "License" else "Format", licenseSummary(item))
                         }
                         if (item.category == Category.GAMES) {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -96,14 +96,14 @@ internal fun ItemDialog(item: CatalogItem, report: CompatibilityReport?, reposit
                                     style = MaterialTheme.typography.bodySmall) }
                             }
                         }
-                        if (item.category == Category.GAMES) UpdateControls(item, repository, onQueue)
+                        if (item.category.supportsUpdates) UpdateControls(item, repository, onQueue)
                         if (!enabled) Text("No download URL", color = MaterialTheme.colorScheme.error)
                     }
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     Row(Modifier.fillMaxWidth().padding(if (compact) 10.dp else 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         OutlinedButton(onClick = onDismiss, modifier = Modifier.weight(1f).focusRequester(close).controllerFocus()
                             .onGloballyPositioned { if (!enabled) ready = true }) { Text("Close") }
-                        Button(onClick = { onQueue(item) }, enabled = enabled, modifier = Modifier.weight(1f).focusRequester(primary).controllerFocus()
+                        Button(onClick = { onQueue(listOf(item)) }, enabled = enabled, modifier = Modifier.weight(1f).focusRequester(primary).controllerFocus()
                             .onGloballyPositioned { if (enabled) ready = true }) { Text("Download") }
                     }
                 }
@@ -118,4 +118,10 @@ private fun DetailValue(label: String, value: String, modifier: Modifier = Modif
         Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(value, style = MaterialTheme.typography.bodyMedium)
     }
+}
+
+private fun licenseSummary(item: CatalogItem): String = when {
+    !item.category.hasLicense -> "PKG"
+    item.category.platform == org.pkgj.android.catalog.Platform.PS3 -> if (item.rap.isNotEmpty()) "RAP available" else "No RAP"
+    else -> if (item.zrif.isNotEmpty()) "RIF available" else "No RIF"
 }

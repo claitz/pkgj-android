@@ -3,9 +3,9 @@
 An Android port of [PKGj for PS Vita](https://github.com/blastrock/pkgj), rebuilt natively for Android.
 This repository does not include or build the Vita application.
 
-Browse PS Vita catalogs, search and filter titles, queue PKG downloads, and save packages and available RIF files to a folder you choose.
+Browse PS Vita, PSP, PS1 and PS3 catalogs, search and filter titles, queue PKG downloads, and save packages and available license files to a folder you choose.
 
-Vita3K compatibility reports status pills.
+Vita games include Vita3K compatibility status pills.
 
 ![PKGj Android Catalog in landscape](docs/screenshot.png)
 
@@ -38,15 +38,17 @@ D-pad or left stick to navigate, A to select, B to go back. L1/R1 switch tabs. L
 
 ## Game updates
 
-**Download** queues the game and its available update in your chosen folder. Details show update info automatically; **Download update** saves just the patch, and the refresh icon checks again. Updates use the exact regional Title ID, have separate versioned filenames and do not generate another RIF.
+For Vita and PS3, **Download** queues the game and its available updates in your chosen folder. Details load update info automatically; **Download update** saves just the patch, and the refresh icon checks again. PS3 downloads retain the full update sequence. Updates use the exact regional Title ID and separate versioned filenames, with no extra license file. PSP and PS1 have no verified update feed in the upstream projects.
 
-Install the base game in Vita3K first, then select the update through **Install .pkg**. Use the matching game license if Vita3K prompts for one. The app cannot see your installed version.
+For Vita, install the base game in Vita3K first, then select the update through **Install .pkg**. Use the matching game license if Vita3K prompts for one. For PS3, install the downloaded updates in manifest order. The app cannot see your installed version.
 
 ## Notes
 
 - Catalogs and compatibility reports are fetched from their public upstream sources and cached for offline use. Custom catalog URLs and local TSV imports are supported.
-- Compatibility labels are community reports and may not match the current Vita3K Android build or device.
-- New downloads go directly to the selected folder. Vita3K handles installation and license selection. Older downloads stored inside the app can be moved with **Save to folder**.
+- Compatibility labels and filters apply only to Vita games. They are community reports and may not match the current Vita3K Android build or device.
+- PS3 catalogs support NoPayStation TSV and PKGi PS3 CSV. Supplied RAP data is saved as a 16-byte `CONTENTID.rap` file. No console-specific PS3 RIF is generated.
+- PSP and PS1 downloads are original PSN PKG files; ISO, PBP or disc-image conversion is not implemented.
+- All platforms share the selected download folder. New downloads go directly to that folder. Vita3K handles installation and license selection. Older downloads stored inside the app can be moved with **Save to folder**.
 - No game files, credentials, or license material are bundled.
 
 See [docs/android-port.md](docs/android-port.md) for architecture, catalog formats, Vita3K integration findings, limitations, and the device test checklist.

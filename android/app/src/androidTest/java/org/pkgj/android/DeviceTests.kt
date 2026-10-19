@@ -66,6 +66,10 @@ class DeviceTests {
                     "ID\t$region\t$name\thttp://127.0.0.1/unused\t\tEP0000-PCSE9000${index + 1}_00-0000000000000000\t\t\t4"
                 }.joinToString("\n")
                 store.replaceCatalog(Category.GAMES, tsv.reader())
+                store.replaceCatalog(Category.PSP, "header\nID\tJP\tOriginal\tPSP fixture\thttp://127.0.0.1/unused\tJP0000-NPJH90001_00-0000000000000000\t\t\t\t4".reader())
+                store.replaceCatalog(Category.PSX, "header\nID\tEU\tPS1 fixture\thttp://127.0.0.1/unused\tEP0000-NPEF90001_00-0000000000000000\t\t\t4".reader())
+                store.replaceCatalog(Category.PS3_GAMES, "Title ID\tRegion\tName\tURL\tRAP\tContent ID\tDate\tFilename\tSize\nID\tUS\tPS3 fixture\thttp://127.0.0.1/unused\t000102030405060708090a0b0c0d0e0f\tUP0000-NPUB90001_00-0000000000000000\t\t\t4".reader())
+                store.savePatchCheck(org.pkgj.android.updates.PatchCheck("NPUB90001", System.currentTimeMillis(), null, Platform.PS3))
                 store.replaceCompatibility(listOf(
                     CompatibilityReport("PCSE90001", 1, "Playable", 1),
                     CompatibilityReport("PCSE90002", 2, "Ingame + / Menu", 1),
@@ -304,6 +308,134 @@ class DeviceTests {
             }
         }
         context.deleteDatabase(file.name)
+    }
+
+    private fun choosePlatform(label: String) {
+        compose.onNodeWithContentDescription("Platform").performSemanticsAction(SemanticsActions.RequestFocus)
+        key(KeyEvent.KEYCODE_BUTTON_A)
+        repeat(Platform.entries.size + 1) {
+            val focused = compose.onNodeWithText(label).fetchSemanticsNode().config
+                .getOrElse(androidx.compose.ui.semantics.SemanticsProperties.Focused) { false }
+            if (!focused) key(KeyEvent.KEYCODE_DPAD_DOWN)
+        }
+        compose.onNodeWithText(label).assertIsFocused()
+        key(KeyEvent.KEYCODE_BUTTON_A)
+    }
+
+    @Test fun controllerCanSwitchPlatformsWithoutCompatibilityLeaking() {
+        choosePlatform("PSP")
+        compose.onNodeWithText("PSP fixture").assertIsDisplayed()
+        compose.onAllNodesWithContentDescription("Compatibility").assertCountEquals(0)
+        compose.onNodeWithText("PSP fixture").performSemanticsAction(SemanticsActions.RequestFocus)
+        key(KeyEvent.KEYCODE_BUTTON_A)
+        compose.onNodeWithText("PKG").assertExists()
+        compose.onAllNodesWithText("Unreported").assertCountEquals(0)
+        compose.onAllNodesWithContentDescription("Refresh update").assertCountEquals(0)
+        key(KeyEvent.KEYCODE_BUTTON_B)
+        choosePlatform("PS1")
+        compose.onNodeWithText("PS1 fixture").assertIsDisplayed()
+        choosePlatform("PS3")
+        compose.onNodeWithText("PS3 fixture").assertIsDisplayed()
+        compose.onAllNodesWithContentDescription("Compatibility").assertCountEquals(0)
+        compose.onNodeWithText("PS3 fixture").performSemanticsAction(SemanticsActions.RequestFocus)
+        key(KeyEvent.KEYCODE_BUTTON_A)
+        compose.onNodeWithText("RAP available").assertExists()
+        compose.onNodeWithText("None available").assertExists()
+        compose.onAllNodesWithText("Unreported").assertCountEquals(0)
+        key(KeyEvent.KEYCODE_BUTTON_B)
+        key(KeyEvent.KEYCODE_BUTTON_R1)
+        key(KeyEvent.KEYCODE_BUTTON_R1)
+        choosePlatform("PS3")
+        compose.onNodeWithText("URL").assertIsDisplayed()
+        compose.onNodeWithText("https://nopaystation.com/tsv/PS3_GAMES.tsv").assertExists()
+    }
+
+    @Test fun pspAndPs1UseThePersistentFolderQueueWithoutLicenseFiles() {
+        val repo = Repository.get(context)
+        repo.setExportFolder(tree)
+        MockWebServer().use { server ->
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest) = MockResponse().setBody("synthetic-pkg")
+            }
+            val items = listOf(
+                CatalogItem(Category.PSP, "NPJH90001", "JP0000-NPJH90001_00-0000000000000000", "JP", "PSP queue fixture", server.url("/psp").toString(), 13),
+                CatalogItem(Category.PSX, "NPEF90001", "EP0000-NPEF90001_00-0000000000000000", "EU", "PS1 queue fixture", server.url("/ps1").toString(), 13))
+            repo.queue(items)
+            val ids = items.map { item -> repo.store.jobs().first { it.title == item.title }.id }
+            val jobs = ids.map { awaitJob(it) { job -> job.state == JobState.DOWNLOADED } }
+            jobs.forEach { job ->
+                assertFalse(job.needsLicense); assertEquals("", job.updateCheck); assertNull(job.licenseUri); assertEquals("", job.error)
+                assertArrayEquals("synthetic-pkg".toByteArray(), context.contentResolver.openInputStream(Uri.parse(job.packageUri))!!.use { it.readBytes() })
+                repo.discardDownloadFiles(job); repo.store.removeJob(job.id)
+            }
+            assertEquals(listOf("/psp", "/ps1"), (0..1).map { server.takeRequest().path })
+            repo.refreshJobs()
+        }
+    }
+
+    @Test fun ps3GameDownloadsRapAndAllUpdatesInManifestOrder() {
+        val repo = Repository.get(context)
+        repo.setExportFolder(tree)
+        MockWebServer().use { server ->
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest) = MockResponse().setBody(request.path.orEmpty())
+            }
+            val id = "NPUB90001"
+            val game = CatalogItem(Category.PS3_GAMES, id, "UP0000-${id}_00-0000000000000000", "US", "PS3 auto fixture", server.url("/base").toString(), 5,
+                rap = "000102030405060708090a0b0c0d0e0f")
+            val packages = listOf(
+                org.pkgj.android.updates.GamePatch(id, "01.01", server.url("/first").toString(), 6, "03.5500", Platform.PS3),
+                org.pkgj.android.updates.GamePatch(id, "01.02", server.url("/second").toString(), 7, "04.2000", Platform.PS3))
+            repo.store.savePatchCheck(org.pkgj.android.updates.PatchCheck(id, System.currentTimeMillis(), packages.last(), Platform.PS3, packages))
+            assertEquals(packages, repo.store.patchCheck(id, Platform.PS3)!!.packages)
+            repo.queue(game)
+            val baseId = repo.store.jobs().first { it.title == game.title && it.downloadType == DownloadType.CATALOG }.id
+            val base = awaitJob(baseId) { it.state == JobState.DOWNLOADED }
+            val patches = packages.map { patch ->
+                compose.waitUntil(5_000) { repo.store.patchJob(id, patch.version, Category.PS3_GAMES) != null }
+                awaitJob(repo.store.patchJob(id, patch.version, Category.PS3_GAMES)!!.id) { it.state == JobState.DOWNLOADED }
+            }
+            assertEquals("DONE", base.updateCheck); assertEquals("", base.error)
+            assertTrue(base.licenseExported); assertEquals("${game.contentId}.rap", repo.licenseFile(base).name)
+            assertArrayEquals(ByteArray(16) { it.toByte() }, context.contentResolver.openInputStream(Uri.parse(base.licenseUri))!!.use { it.readBytes() })
+            patches.forEach { assertFalse(it.needsLicense); assertNull(it.licenseUri); assertEquals("", it.rap); assertEquals("", it.error) }
+            assertEquals(listOf("/base", "/first", "/second"), (0..2).map { server.takeRequest().path })
+            assertFalse(File(repo.downloadsDir, base.filename).exists())
+            assertEquals(2, repo.store.patchCheck(id, Platform.PS3)!!.packages.size)
+            assertNull(repo.store.patchCheck(id, Platform.VITA))
+            (patches + base).forEach { repo.discardDownloadFiles(it); repo.store.removeJob(it.id) }
+            repo.refreshJobs()
+        }
+    }
+
+    @Test fun schema8MigrationPreservesJobsAndVitaCacheAndAllowsPs3Parts() {
+        val name = "platform-migration.db"
+        context.deleteDatabase(name)
+        android.database.sqlite.SQLiteDatabase.openOrCreateDatabase(context.getDatabasePath(name), null).use { db ->
+            db.execSQL("CREATE TABLE catalog(category TEXT NOT NULL,content TEXT NOT NULL,titleid TEXT NOT NULL,region TEXT NOT NULL,title TEXT NOT NULL,url TEXT NOT NULL,size INTEGER,zrif TEXT NOT NULL DEFAULT '',version TEXT NOT NULL DEFAULT '',PRIMARY KEY(category,content))")
+            db.execSQL("CREATE TABLE jobs(id INTEGER PRIMARY KEY AUTOINCREMENT,category TEXT NOT NULL,content TEXT NOT NULL,title TEXT NOT NULL,url TEXT NOT NULL,filename TEXT NOT NULL,state TEXT NOT NULL,bytes INTEGER NOT NULL DEFAULT 0,total INTEGER,etag TEXT,error TEXT,speed INTEGER NOT NULL DEFAULT 0,exported INTEGER NOT NULL DEFAULT 0,zrif TEXT NOT NULL DEFAULT '',license_exported INTEGER NOT NULL DEFAULT 0,folder_uri TEXT,package_uri TEXT,license_uri TEXT,transfer_complete INTEGER NOT NULL DEFAULT 0,type TEXT NOT NULL DEFAULT 'CATALOG',titleid TEXT NOT NULL DEFAULT '',patch_version TEXT NOT NULL DEFAULT '',update_check TEXT NOT NULL DEFAULT '',update_error TEXT NOT NULL DEFAULT '',region TEXT NOT NULL DEFAULT '')")
+            db.execSQL("CREATE UNIQUE INDEX jobs_update_identity ON jobs(titleid,patch_version) WHERE type='UPDATE'")
+            db.execSQL("CREATE TABLE update_checks(titleid TEXT PRIMARY KEY,checked_at INTEGER NOT NULL,version TEXT,url TEXT,size INTEGER,firmware TEXT)")
+            db.execSQL("INSERT INTO jobs(category,content,title,url,filename,state,bytes,type,titleid,patch_version) VALUES('GAMES','update:PCSE90001:01.02','Legacy patch','https://example.invalid/patch','legacy.pkg','PAUSED',123,'UPDATE','PCSE90001','01.02')")
+            db.execSQL("INSERT INTO update_checks VALUES('PCSE90001',12345,'01.02','https://example.invalid/patch',123,'3.60')")
+            db.version = 8
+        }
+        Store(context, name).use { store ->
+            val old = store.jobs().single()
+            assertEquals(JobState.PAUSED, old.state); assertEquals(123L, old.bytes); assertEquals("", old.rap)
+            assertEquals("update:PCSE90001:01.02", old.identity)
+            val cached = store.patchCheck("PCSE90001")!!
+            assertEquals(12345L, cached.checkedAt); assertEquals("01.02", cached.packages.single().version)
+            assertNull(store.patchCheck("PCSE90001", Platform.PS3))
+            val game = CatalogItem(Category.PS3_GAMES, "PCSE90001", "UP0000-PCSE90001_00-0000000000000000", "US", "PS3 fixture", "https://example.invalid/base", 4)
+            val ids = (1..2).map { part ->
+                val patch = org.pkgj.android.updates.GamePatch(game.titleId, "01.02", "https://example.invalid/$part", 4, null, Platform.PS3, part).downloadItem(game)
+                store.addJob(patch, "ps3-$part.pkg", tree.toString())
+            }
+            assertNotEquals(ids[0], ids[1]); assertEquals(3, store.jobs().size)
+            assertEquals(1, store.patchJob(game.titleId, "01.02", Category.PS3_GAMES, 1)!!.patchPart)
+        }
+        context.deleteDatabase(name)
     }
 
     @Test fun controllerCanDownloadCachedPatchWithoutRifOrBaseCollision() {

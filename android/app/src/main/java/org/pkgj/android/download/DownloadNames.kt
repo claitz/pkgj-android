@@ -15,7 +15,7 @@ object DownloadNames {
             .takeIf { it != "0" && it.matches(Regex("[0-9]+(\\.[0-9]+)*")) }
         val suffix = if (item.downloadType == DownloadType.UPDATE) {
             requireNotNull(version) { "Update version is required" }
-            " - Update v$version"
+            " - Update v$version" + if (item.patchPart > 0) " - Part ${item.patchPart.toString().padStart(2, '0')}" else ""
         } else version?.let { " v$it" }.orEmpty()
         return "[$region-$titleId] - $title$suffix"
     }

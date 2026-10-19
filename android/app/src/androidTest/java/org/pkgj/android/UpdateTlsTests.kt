@@ -56,6 +56,25 @@ class UpdateTlsTests {
             .validityInterval(1_000, 2_000).signedBy(issuer).build()
         assertThrows(SSLException::class.java) { fetch(leaf, issuer.certificate) }
     }
+    @Test fun legacyConfigurationIsLimitedToTheTwoExactSonyUpdateHosts() {
+        val tls = SonyUpdateTls(InstrumentationRegistry.getInstrumentation().targetContext.resources.openRawResource(R.raw.sony_update_ca))
+        listOf(SonyUpdateTls.HOST, SonyUpdateTls.PS3_HOST, SonyUpdateTls.PS3_HOST.uppercase()).forEach { host ->
+            val connection = java.net.URL("https://$host/manifest").openConnection() as HttpsURLConnection
+            val original = connection.sslSocketFactory
+            tls.configure(connection)
+            assertNotSame(original, connection.sslSocketFactory)
+            assertFalse(connection.hostnameVerifier.verify("example.invalid", null))
+        }
+        listOf("b0.ww.np.dl.playstation.net", "sub." + SonyUpdateTls.PS3_HOST,
+            SonyUpdateTls.PS3_HOST + ".example.invalid", "example.invalid").forEach { host ->
+            val connection = java.net.URL("https://$host/manifest").openConnection() as HttpsURLConnection
+            val factory = connection.sslSocketFactory
+            val verifier = connection.hostnameVerifier
+            tls.configure(connection)
+            assertSame(factory, connection.sslSocketFactory)
+            assertSame(verifier, connection.hostnameVerifier)
+        }
+    }
     @Test fun hostnameWildcardsOnlyMatchOneLabelAndExactSonyHostIsRequired() {
         assertTrue(SonyUpdateTls.matchesDns(SonyUpdateTls.HOST, "*.ww.np.dl.playstation.net"))
         assertFalse(SonyUpdateTls.matchesDns("nested." + SonyUpdateTls.HOST, "*.ww.np.dl.playstation.net"))

@@ -14,10 +14,13 @@ data class DownloadJob(val id: Long, val category: Category, val contentId: Stri
     val licenseExported: Boolean = false, val folderUri: String? = null,
     val packageUri: String? = null, val licenseUri: String? = null, val transferComplete: Boolean = false,
     val downloadType: DownloadType = DownloadType.CATALOG, val titleId: String = "", val patchVersion: String = "",
-    val updateCheck: String = "", val updateError: String = "", val region: String = "") {
-    val displayTitle get() = if (downloadType == DownloadType.UPDATE) "$title - Update v$patchVersion" else title
-    val needsLicense get() = downloadType != DownloadType.UPDATE && category.vita3kRelevant
-    val identity get() = if (downloadType == DownloadType.UPDATE) "update:$titleId:$patchVersion" else "catalog:${category.name}:$contentId"
+    val updateCheck: String = "", val updateError: String = "", val region: String = "",
+    val rap: String = "", val patchPart: Int = 0) {
+    val displayTitle get() = if (downloadType == DownloadType.UPDATE) "$title - Update v$patchVersion" + if (patchPart > 0) " Part $patchPart" else "" else title
+    val licenseLabel get() = category.licenseLabel
+    val licenseName get() = if (category.platform == org.pkgj.android.catalog.Platform.PS3) org.pkgj.android.catalog.Ps3License.filename(contentId) else filename.removeSuffix(".pkg") + ".rif"
+    val needsLicense get() = downloadType != DownloadType.UPDATE && (category.vita3kRelevant || (category.platform == org.pkgj.android.catalog.Platform.PS3 && rap.isNotBlank()))
+    val identity get() = if (downloadType == DownloadType.UPDATE) org.pkgj.android.updates.GamePatch(titleId, patchVersion, url, total, null, category.platform, patchPart).identity else "catalog:${category.name}:$contentId"
 }
 
 object JobTransitions {

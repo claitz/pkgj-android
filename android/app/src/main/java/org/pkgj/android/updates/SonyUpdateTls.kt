@@ -23,13 +23,15 @@ class SonyUpdateTls(ca: InputStream) {
         factory = socketFactory(root)
     }
     fun configure(connection: HttpURLConnection) {
-        if (connection is HttpsURLConnection && connection.url.host.equals(HOST, true)) {
+        val host = connection.url.host
+        if (connection is HttpsURLConnection && listOf(HOST, PS3_HOST).any { it.equals(host, true) }) {
             connection.sslSocketFactory = factory
-            connection.hostnameVerifier = hostnameVerifier(HOST)
+            connection.hostnameVerifier = hostnameVerifier(host)
         }
     }
     companion object {
         const val HOST = "gs-sec.ww.np.dl.playstation.net"
+        const val PS3_HOST = "a0.ww.np.dl.playstation.net"
         const val CA_SHA256 = "51d5a7833f67f1d1c6212f75997e4b83dada0f7910ba4b5a3fa4e9b7b9bc827c"
         // Internal seams let local fixture tests exercise validation without trusting fixture CAs in production.
         internal fun socketFactory(root: X509Certificate): SSLSocketFactory {
