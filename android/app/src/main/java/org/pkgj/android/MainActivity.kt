@@ -198,7 +198,7 @@ private fun CatalogApp(repository: Repository, onMotion: (MotionEvent, View) -> 
             }
         }
         Box(Modifier.fillMaxSize().safeDrawingPadding(), contentAlignment = Alignment.BottomCenter) { SnackbarHost(snackbar) }
-        selected?.let { item -> ItemDialog(item, compatibility[item.titleId], onDismiss = { selected = null }, onQueue = { onQueue(item); selected = null }) }
+        selected?.let { item -> ItemDialog(item, compatibility[item.titleId], repository, onDismiss = { selected = null }, onQueue = { download -> onQueue(download); selected = null }) }
         }
     }
 }
@@ -258,15 +258,17 @@ private fun DownloadsScreen(repository: Repository, onExport: (DownloadJob) -> U
                             }
                             TextButton(modifier = Modifier.controllerFocus(), onClick = { deleteTarget = job }) { Text("Delete") }
                         }
+                        if (job.updateCheck == "FAILED" && job.state != JobState.CANCELED)
+                            TextButton(modifier = Modifier.controllerFocus(), onClick = { repository.retryGameUpdate(job) }) { Text("Retry update") }
                         if (job.state != JobState.DOWNLOADED && job.state != JobState.CANCELED) TextButton(modifier = Modifier.controllerFocus(), onClick = { repository.delete(job) }) { Text("Cancel") }
                     }
                 }
                 Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     if (wide) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         Column(Modifier.weight(1f)) {
-                            Text(job.title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                            Text(job.displayTitle, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Text(if (job.state == JobState.DOWNLOADED && job.folderUri != null) "Saved" else job.state.name.lowercase().replaceFirstChar { it.uppercase() }, color = Mint, style = MaterialTheme.typography.bodySmall)
+                                Text(if (job.state == JobState.RUNNING && job.updateCheck == "PENDING") "Checking update" else if (job.state == JobState.DOWNLOADED && job.folderUri != null) "Saved" else job.state.name.lowercase().replaceFirstChar { it.uppercase() }, color = Mint, style = MaterialTheme.typography.bodySmall)
                                 if (job.state == JobState.RUNNING || job.state == JobState.PAUSED)
                                     Text("${sizeLabel(job.bytes)} / ${sizeLabel(job.total)}    ${sizeLabel(job.speed)}/s",
                                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -274,8 +276,8 @@ private fun DownloadsScreen(repository: Repository, onExport: (DownloadJob) -> U
                         }
                         Box(Modifier.widthIn(max = 380.dp)) { actions() }
                     } else {
-                        Text(job.title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                        Text(if (job.state == JobState.DOWNLOADED && job.folderUri != null) "Saved" else job.state.name.lowercase().replaceFirstChar { it.uppercase() }, color = Mint, style = MaterialTheme.typography.bodySmall)
+                        Text(job.displayTitle, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                        Text(if (job.state == JobState.RUNNING && job.updateCheck == "PENDING") "Checking update" else if (job.state == JobState.DOWNLOADED && job.folderUri != null) "Saved" else job.state.name.lowercase().replaceFirstChar { it.uppercase() }, color = Mint, style = MaterialTheme.typography.bodySmall)
                     }
                     if (job.folderUri == null && (job.exported || job.licenseExported)) Text(
                         listOfNotNull(if (job.exported) "PKG exported" else null,
@@ -286,12 +288,14 @@ private fun DownloadsScreen(repository: Repository, onExport: (DownloadJob) -> U
                         if (!wide) Text("${sizeLabel(job.bytes)} / ${sizeLabel(job.total)}    ${sizeLabel(job.speed)}/s", style = MaterialTheme.typography.bodySmall)
                     }
                     if (!job.error.isNullOrBlank()) Text(job.error, color = MaterialTheme.colorScheme.error)
+                    if (job.updateCheck == "FAILED" && job.state != JobState.CANCELED)
+                        Text("Update: ${job.updateError}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                     if (!wide) actions()
                 }
             }
         }
     }
-    deleteTarget?.let { job -> DeleteFilesDialog(job.title,
+    deleteTarget?.let { job -> DeleteFilesDialog(job.displayTitle,
         onDelete = { repository.deleteCompleted(job); deleteTarget = null }, onDismiss = { deleteTarget = null }) }
 }
 

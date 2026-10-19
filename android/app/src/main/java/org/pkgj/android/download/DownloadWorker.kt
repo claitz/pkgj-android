@@ -24,14 +24,23 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
         var active: DownloadJob? = null
         try {
             while (true) {
-                val job = store.jobs().firstOrNull { it.state == JobState.QUEUED } ?: break
+                val job = store.jobs().firstOrNull { it.state == JobState.QUEUED }
+                if (job == null) {
+                    val pending = store.jobs().firstOrNull { it.updateCheck == "PENDING" && it.state in setOf(JobState.DOWNLOADED, JobState.FAILED) } ?: break
+                    setForeground(notification(pending.displayTitle, pending.bytes, pending.total))
+                    repository.queueGameUpdate(pending)
+                    continue
+                }
                 active = job
-                setForeground(notification(job.title, 0, null))
+                setForeground(notification(job.displayTitle, 0, null))
                 if (!store.transition(job.id, JobState.RUNNING)) continue
                 store.update(job.id, error = "", speed = 0)
                 repository.refreshJobs()
                 try {
                     var current = store.job(job.id) ?: continue
+                    if (current.updateCheck == "PENDING") repository.queueGameUpdate(current)
+                    current = store.job(job.id) ?: continue
+                    if (current.state != JobState.RUNNING) throw DownloadInterrupted(current.state)
                     if (!current.transferComplete) {
                         var notificationAt = 0L
                         val control = {
@@ -43,7 +52,7 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
                                 repository.refreshJobs()
                                 val now = System.currentTimeMillis()
                                 if (now - notificationAt >= 1000) {
-                                    val info = notification(job.title, bytes, total)
+                                    val info = notification(job.displayTitle, bytes, total)
                                     applicationContext.getSystemService(NotificationManager::class.java).notify(42, info.notification)
                                     notificationAt = now
                                 }
@@ -61,7 +70,7 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     current = store.job(job.id) ?: continue
                     if (current.state != JobState.RUNNING) throw DownloadInterrupted(current.state)
                     val licenseError = if (current.folderUri != null) repository.finishFolderDownload(current)
-                        else if (current.category.vita3kRelevant) try {
+                        else if (current.needsLicense) try {
                             if (repository.ensureLicense(current) == null) "No RIF" else null
                         } catch (_: IllegalArgumentException) { "Invalid RIF" } else null
                     if (store.job(job.id)?.state != JobState.RUNNING) throw DownloadInterrupted(store.job(job.id)?.state ?: JobState.CANCELED)

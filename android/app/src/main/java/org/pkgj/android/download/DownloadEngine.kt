@@ -12,7 +12,13 @@ data class DownloadJob(val id: Long, val category: Category, val contentId: Stri
     val url: String, val filename: String, val state: JobState, val bytes: Long, val total: Long?,
     val etag: String?, val error: String?, val speed: Long, val exported: Boolean, val zrif: String = "",
     val licenseExported: Boolean = false, val folderUri: String? = null,
-    val packageUri: String? = null, val licenseUri: String? = null, val transferComplete: Boolean = false)
+    val packageUri: String? = null, val licenseUri: String? = null, val transferComplete: Boolean = false,
+    val downloadType: DownloadType = DownloadType.CATALOG, val titleId: String = "", val patchVersion: String = "",
+    val updateCheck: String = "", val updateError: String = "", val region: String = "") {
+    val displayTitle get() = if (downloadType == DownloadType.UPDATE) "$title - Update v$patchVersion" else title
+    val needsLicense get() = downloadType != DownloadType.UPDATE && category.vita3kRelevant
+    val identity get() = if (downloadType == DownloadType.UPDATE) "update:$titleId:$patchVersion" else "catalog:${category.name}:$contentId"
+}
 
 object JobTransitions {
     fun canMove(from: JobState, to: JobState) = when (from) {

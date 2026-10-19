@@ -26,7 +26,7 @@ import org.pkgj.android.catalog.Category
 import org.pkgj.android.compatibility.CompatibilityReport
 
 @Composable
-internal fun ItemDialog(item: CatalogItem, report: CompatibilityReport?, onDismiss: () -> Unit, onQueue: () -> Unit) {
+internal fun ItemDialog(item: CatalogItem, report: CompatibilityReport?, repository: org.pkgj.android.data.Repository, onDismiss: () -> Unit, onQueue: (CatalogItem) -> Unit) {
     val primary = remember { FocusRequester() }
     val close = remember { FocusRequester() }
     val scroll = rememberScrollState()
@@ -96,13 +96,14 @@ internal fun ItemDialog(item: CatalogItem, report: CompatibilityReport?, onDismi
                                     style = MaterialTheme.typography.bodySmall) }
                             }
                         }
+                        if (item.category == Category.GAMES) UpdateControls(item, repository, onQueue)
                         if (!enabled) Text("No download URL", color = MaterialTheme.colorScheme.error)
                     }
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     Row(Modifier.fillMaxWidth().padding(if (compact) 10.dp else 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         OutlinedButton(onClick = onDismiss, modifier = Modifier.weight(1f).focusRequester(close).controllerFocus()
                             .onGloballyPositioned { if (!enabled) ready = true }) { Text("Close") }
-                        Button(onClick = onQueue, enabled = enabled, modifier = Modifier.weight(1f).focusRequester(primary).controllerFocus()
+                        Button(onClick = { onQueue(item) }, enabled = enabled, modifier = Modifier.weight(1f).focusRequester(primary).controllerFocus()
                             .onGloballyPositioned { if (enabled) ready = true }) { Text("Download") }
                     }
                 }

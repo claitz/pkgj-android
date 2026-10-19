@@ -1,5 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application>
+        <activity android:name="org.pkgj.android.FixtureGrantActivity" android:exported="true" android:theme="@android:style/Theme.NoDisplay" />
         <provider android:name="org.pkgj.android.FixtureDocumentsProvider"
             android:authorities="org.pkgj.android.catalog.test.documents"
             android:exported="true" android:grantUriPermissions="true" android:permission="android.permission.MANAGE_DOCUMENTS">

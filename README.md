@@ -36,6 +36,12 @@ adb shell am start -n org.pkgj.android.catalog/org.pkgj.android.MainActivity
 
 D-pad or left stick to navigate, A to select, B to go back. L1/R1 switch tabs. L2/R2 or the right stick page through lists; hold a trigger to scroll faster.
 
+## Game updates
+
+**Download** queues the game and its available update in your chosen folder. Details show update info automatically; **Download update** saves just the patch, and the refresh icon checks again. Updates use the exact regional Title ID, have separate versioned filenames and do not generate another RIF.
+
+Install the base game in Vita3K first, then select the update through **Install .pkg**. Use the matching game license if Vita3K prompts for one. The app cannot see your installed version.
+
 ## Notes
 
 - Catalogs and compatibility reports are fetched from their public upstream sources and cached for offline use. Custom catalog URLs and local TSV imports are supported.

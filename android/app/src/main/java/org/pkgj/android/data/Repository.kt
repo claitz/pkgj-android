@@ -17,6 +17,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.pkgj.android.catalog.*
+import org.pkgj.android.updates.*
+import kotlinx.coroutines.ensureActive
+import kotlin.coroutines.coroutineContext
 import org.pkgj.android.compatibility.*
 import org.pkgj.android.download.*
 import java.io.File
@@ -62,7 +65,7 @@ class Repository private constructor(private val context: Context) {
 
     private fun repairDownloadedLicenses() {
         var changed = false
-        store.jobs().filter { it.folderUri == null && it.state == JobState.DOWNLOADED && it.category.vita3kRelevant &&
+        store.jobs().filter { it.folderUri == null && it.state == JobState.DOWNLOADED && it.needsLicense &&
             (isLicenseError(it.error) || !licenseFile(it).isFile) }.forEach { job ->
             try {
                 if (ensureLicense(job) != null) {
@@ -175,10 +178,41 @@ class Repository private constructor(private val context: Context) {
         finally { loading.value = false }
     }
 
+    private val patchSource by lazy {
+        val tls = SonyUpdateTls(context.resources.openRawResource(org.pkgj.android.R.raw.sony_update_ca))
+        PatchSource(configureConnection = tls::configure)
+    }
+    suspend fun cachedPatch(titleId: String): PatchCheck? = withContext(Dispatchers.IO) { store.patchCheck(titleId) }
+    suspend fun checkPatch(titleId: String, refresh: Boolean = false, source: PatchSource = patchSource): PatchCheck = withContext(Dispatchers.IO) {
+        require(PatchUrls.validTitleId(titleId)) { "Invalid PS Vita Title ID" }
+        val cached = store.patchCheck(titleId)
+        val now = System.currentTimeMillis()
+        if (!refresh && cached != null && now - cached.checkedAt in 0 until 24L * 60 * 60 * 1000) return@withContext cached
+        val patch = source.fetch(titleId)
+        coroutineContext.ensureActive()
+        PatchCheck(titleId, System.currentTimeMillis(), patch).also { store.savePatchCheck(it) }
+    }
+
     fun queue(item: CatalogItem) {
         require(item.category.vita3kRelevant) { "Only PS Vita content is supported" }
         if (!CatalogParser.usableUrl(item.url)) { status.value = "No download URL"; return }
         val folder = exportFolder.value ?: run { status.value = "Choose a download folder in Settings"; return }
+        enqueueDownload(item, folder)
+        refreshJobs(); schedule()
+    }
+
+    @Synchronized
+    private fun enqueueDownload(item: CatalogItem, folder: String, automatic: Boolean = false): Long {
+        if (item.downloadType == DownloadType.UPDATE) {
+            store.patchJob(item.titleId, item.version)?.let { existing ->
+                if (!automatic) when (existing.state) {
+                    JobState.PAUSED, JobState.FAILED, JobState.CANCELED -> action(existing, JobState.QUEUED)
+                    JobState.DOWNLOADED -> status.value = "Update already saved"
+                    else -> status.value = "Update already queued"
+                }
+                return existing.id
+            }
+        }
         val base = DownloadNames.baseName(item)
         var filename = "$base.pkg"
         var copy = 2
@@ -187,13 +221,48 @@ class Repository private constructor(private val context: Context) {
             filename = "$base ($copy).pkg"
             copy++
         }
-        store.addJob(item, filename, folder); refreshJobs(); schedule()
+        return store.addJob(item, filename, folder, checkForUpdate = true)
+    }
+
+    /** Run by the persistent queue. Discovery errors never fail the base transfer. */
+    suspend fun queueGameUpdate(job: DownloadJob, source: PatchSource? = null) {
+        if (job.updateCheck != "PENDING") return
+        try {
+            val result = if (source == null) checkPatch(job.titleId) else checkPatch(job.titleId, source = source)
+            coroutineContext.ensureActive()
+            finishGameUpdateCheck(job.id, result)
+        } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+        catch (e: Exception) { store.setUpdateCheck(job.id, "FAILED", updateCheckError(e)) }
+        refreshJobs()
+    }
+
+    @Synchronized
+    private fun finishGameUpdateCheck(id: Long, result: PatchCheck) {
+        val db = store.writableDatabase
+        db.beginTransaction()
+        try {
+            val job = store.job(id)
+            if (job != null && job.updateCheck == "PENDING" && job.state in setOf(JobState.QUEUED, JobState.RUNNING, JobState.DOWNLOADED, JobState.FAILED)) {
+                result.patch?.let { patch ->
+                    val game = CatalogItem(job.category, job.titleId, job.contentId, job.region, job.title, job.url, job.total)
+                    enqueueDownload(patch.downloadItem(game), requireNotNull(job.folderUri), automatic = true)
+                }
+                store.setUpdateCheck(id, "DONE")
+            }
+            db.setTransactionSuccessful()
+        } finally { db.endTransaction() }
+    }
+
+    fun retryGameUpdate(job: DownloadJob) {
+        if (store.job(job.id)?.updateCheck != "FAILED") return
+        store.setUpdateCheck(job.id, "PENDING")
+        refreshJobs(); schedule()
     }
     fun licenseFile(job: DownloadJob) = File(downloadsDir, job.filename.removeSuffix(".pkg") + ".rif")
-    fun hasCatalogLicense(job: DownloadJob): Boolean = job.category.vita3kRelevant &&
+    fun hasCatalogLicense(job: DownloadJob): Boolean = job.needsLicense &&
         (job.zrif.isNotBlank() || store.catalogZrif(job.category, job.contentId).isNotBlank())
     fun ensureLicense(job: DownloadJob): File? {
-        if (!job.category.vita3kRelevant) return null
+        if (!job.needsLicense) return null
         val zrif = job.zrif.ifBlank { store.catalogZrif(job.category, job.contentId) }
         if (zrif.isBlank()) return null
         val target = licenseFile(job)
@@ -251,6 +320,7 @@ class Repository private constructor(private val context: Context) {
                 catch (e: Exception) { throw java.io.IOException("Could not rename downloaded PKG", e) }
             store.update(job.id, packageUri = (uri ?: error("Could not rename downloaded PKG")).toString())
         }
+        if (!job.needsLicense) return null
         val zrif = job.zrif.ifBlank { store.catalogZrif(job.category, job.contentId) }
         if (zrif.isBlank()) return "No RIF"
         val bytes = try { LicenseCodec.decode(zrif, job.contentId) } catch (_: IllegalArgumentException) { return "Invalid RIF" }
@@ -276,7 +346,7 @@ class Repository private constructor(private val context: Context) {
             val tree = DocumentFile.fromTreeUri(context, Uri.parse(current.folderUri)) ?: error("Download folder unavailable")
             require(tree.canWrite()) { "Cannot delete files. Re-select the original download folder in Settings." }
             val names = listOf(current.filename, current.filename.removeSuffix(".pkg") + ".rif")
-            listOf(current.packageUri, current.licenseUri).forEachIndexed { index, uri ->
+            (if (current.needsLicense) listOf(current.packageUri, current.licenseUri) else listOf(current.packageUri)).forEachIndexed { index, uri ->
                 val document = uri?.let { DocumentFile.fromSingleUri(context, Uri.parse(it)) }?.takeIf { it.exists() }
                     ?: tree.findFile("${names[index]}.${current.id}.part")
                     ?: if (current.transferComplete && uri != null) tree.findFile(names[index]) else null
@@ -286,7 +356,7 @@ class Repository private constructor(private val context: Context) {
             val file = File(downloadsDir, current.filename)
             if (file.exists()) require(file.delete()) { "Could not delete PKG" }
             val license = licenseFile(current)
-            if (license.exists()) require(license.delete()) { "Could not delete RIF" }
+            if (current.needsLicense && license.exists()) require(license.delete()) { "Could not delete RIF" }
         }
     }
 
@@ -296,7 +366,10 @@ class Repository private constructor(private val context: Context) {
             runCatching { discardDownloadFiles(store.job(job.id) ?: job) }
                 .onSuccess { store.update(job.id, bytes = 0, transferComplete = false, exported = false, licenseExported = false) }
                 .onFailure { store.update(job.id, error = it.message ?: "Could not delete files") }
-        } else if (action == JobState.QUEUED) schedule()
+        } else if (action == JobState.QUEUED) {
+            if (job.updateCheck == "FAILED") store.setUpdateCheck(job.id, "PENDING")
+            schedule()
+        }
         refreshJobs()
     }
     fun delete(job: DownloadJob) = action(job, JobState.CANCELED)
@@ -332,6 +405,7 @@ class Repository private constructor(private val context: Context) {
     }
     suspend fun exportLicenseTo(job: DownloadJob, uri: Uri) = withContext(Dispatchers.IO) {
         require(job.state == JobState.DOWNLOADED) { "Download is unavailable" }
+        require(job.needsLicense) { "Updates do not have a separate RIF" }
         if (job.folderUri == null) copyToUri(ensureLicense(job) ?: error("No RIF"), uri)
         else copyDocument(job.licenseUri ?: error("No RIF"), uri)
         store.update(job.id, licenseExported = true, error = ""); refreshJobs()
@@ -352,7 +426,7 @@ class Repository private constructor(private val context: Context) {
                 copyToUri(rif, rifTarget.uri)
             }
             store.update(job.id, folderUri = folder, packageUri = pkgTarget.uri.toString(), licenseUri = rifTarget?.uri?.toString(),
-                transferComplete = true, exported = true, licenseExported = rif != null, error = if (rif != null) "" else "No RIF")
+                transferComplete = true, exported = true, licenseExported = rif != null, error = if (rif != null || !job.needsLicense) "" else "No RIF")
             pkg.delete(); rif?.delete()
             refreshJobs()
             true

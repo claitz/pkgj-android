@@ -42,17 +42,25 @@ class DeviceTests {
         override fun before() {
             if (android.os.Build.VERSION.SDK_INT >= 33)
                 InstrumentationRegistry.getInstrumentation().uiAutomation.grantRuntimePermission(context.packageName, android.Manifest.permission.POST_NOTIFICATIONS)
-            InstrumentationRegistry.getInstrumentation().uiAutomation.adoptShellPermissionIdentity("android.permission.MANAGE_DOCUMENTS")
+            // Grant from the provider owner's test-only activity, as the system picker would.
+            context.startActivity(Intent().setClassName("org.pkgj.android.catalog.test", "org.pkgj.android.FixtureGrantActivity")
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            val grantDeadline = android.os.SystemClock.elapsedRealtime() + 5_000
+            while (context.checkUriPermission(tree, android.os.Process.myPid(), android.os.Process.myUid(),
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                check(android.os.SystemClock.elapsedRealtime() < grantDeadline) { "Fixture URI grant timed out" }
+                Thread.sleep(50)
+            }
             val edit = context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit()
                 .putBoolean("licenseCatalogV2", true).putBoolean("filenameVersionV1", true)
             Category.entries.forEach { edit.putString("source_${it.name}", "local") }
             edit.apply()
-            context.grantUriPermission(context.packageName, tree, Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
             context.contentResolver.call(tree, "reset-fixtures", null, null)
             InstrumentationRegistry.getInstrumentation().uiAutomation.dropShellPermissionIdentity()
             Store(context).use { store ->
                 store.writableDatabase.delete("catalog", null, null)
+                store.writableDatabase.delete("update_checks", null, null)
+                (1..4).forEach { store.savePatchCheck(org.pkgj.android.updates.PatchCheck("PCSE9000$it", System.currentTimeMillis(), null)) }
                 val entries = listOf("Alpha" to "EU", "Beta" to "US", "Gamma" to "JP", "Omega" to "ASIA")
                 val tsv = "header\n" + entries.mapIndexed { index, (name, region) ->
                     "ID\t$region\t$name\thttp://127.0.0.1/unused\t\tEP0000-PCSE9000${index + 1}_00-0000000000000000\t\t\t4"
@@ -139,6 +147,199 @@ class DeviceTests {
         assertEquals("Paging must not block the UI with SQLite reads", 0, violations.get())
     }
 
+    @Test fun updateClientRejectsUntrustedTlsEvenWithSonyCaName() {
+        val fakeCa = okhttp3.tls.HeldCertificate.Builder().certificateAuthority(0).commonName("SCEI DNAS Root 05").build()
+        val leaf = okhttp3.tls.HeldCertificate.Builder().commonName("localhost").addSubjectAlternativeName("localhost").signedBy(fakeCa).build()
+        val certificates = okhttp3.tls.HandshakeCertificates.Builder().heldCertificate(leaf, fakeCa.certificate).build()
+        MockWebServer().use { server ->
+            server.useHttps(certificates.sslSocketFactory(), false)
+            server.enqueue(MockResponse().setBody("<titlepatch/>"))
+            val source = org.pkgj.android.updates.PatchSource { server.url("/manifest").toString() }
+            assertThrows(javax.net.ssl.SSLHandshakeException::class.java) { source.fetch("PCSE90001") }
+        }
+    }
+
+    @Test fun onDemandChecksCacheNoUpdateAndRefreshWithoutReplacingGoodCacheOnError() {
+        val repo = Repository.get(context)
+        repo.store.writableDatabase.delete("update_checks", "titleid=?", arrayOf("PCSE90001"))
+        MockWebServer().use { server ->
+            val source = org.pkgj.android.updates.PatchSource { server.url("/$it.xml").toString() }
+            kotlinx.coroutines.runBlocking {
+                server.enqueue(MockResponse().setResponseCode(404))
+                val missing = repo.checkPatch("PCSE90001", source = source)
+                assertNull(missing.patch); assertTrue(missing.checkedAt > 0)
+                assertEquals(missing, repo.checkPatch("PCSE90001", source = source)); assertEquals(1, server.requestCount)
+                server.enqueue(MockResponse().setBody("<titlepatch titleid=\"PCSE90001\"><tag><package version=\"01.02\" url=\"${server.url("/patch")}\"/></tag></titlepatch>"))
+                val found = repo.checkPatch("PCSE90001", refresh = true, source = source)
+                assertEquals("01.02", found.patch!!.version); assertEquals(2, server.requestCount)
+                server.enqueue(MockResponse().setResponseCode(503))
+                try { repo.checkPatch("PCSE90001", refresh = true, source = source); fail("HTTP errors must not mean no update") }
+                catch (_: java.io.IOException) { }
+                assertEquals(found, repo.cachedPatch("PCSE90001")); assertEquals(3, server.requestCount)
+            }
+        }
+    }
+
+    @Test fun updateCacheAndVersionedJobsSurviveDatabaseReopen() {
+        val name = "updates-migration-fixture.db"
+        val dbFile = context.getDatabasePath(name)
+        context.deleteDatabase(name)
+        android.database.sqlite.SQLiteDatabase.openOrCreateDatabase(dbFile, null).use { db ->
+            db.execSQL("CREATE TABLE jobs(id INTEGER PRIMARY KEY AUTOINCREMENT,category TEXT NOT NULL,content TEXT NOT NULL,title TEXT NOT NULL,url TEXT NOT NULL,filename TEXT NOT NULL,state TEXT NOT NULL,bytes INTEGER NOT NULL DEFAULT 0,total INTEGER,etag TEXT,error TEXT,speed INTEGER NOT NULL DEFAULT 0,exported INTEGER NOT NULL DEFAULT 0,zrif TEXT NOT NULL DEFAULT '',license_exported INTEGER NOT NULL DEFAULT 0,folder_uri TEXT,package_uri TEXT,license_uri TEXT,transfer_complete INTEGER NOT NULL DEFAULT 0)")
+            db.execSQL("INSERT INTO jobs(category,content,title,url,filename,state,bytes,total,zrif,folder_uri,package_uri,transfer_complete) VALUES('GAMES','UP0000-PCSE90001_00-0000000000000000','Existing','https://example.invalid/base','base.pkg','PAUSED',123,999,'existing-rif','content://folder','content://partial',0)")
+            Store(context).use { it.onUpgrade(db, 6, 8) }
+            db.rawQuery("SELECT id,title,state,bytes,total,zrif,folder_uri,package_uri,type,titleid,patch_version FROM jobs", null).use {
+                assertTrue(it.moveToFirst()); assertEquals(1L, it.getLong(0)); assertEquals("Existing", it.getString(1))
+                assertEquals("PAUSED", it.getString(2)); assertEquals(123L, it.getLong(3)); assertEquals(999L, it.getLong(4))
+                assertEquals("existing-rif", it.getString(5)); assertEquals("content://folder", it.getString(6))
+                assertEquals("content://partial", it.getString(7)); assertEquals("CATALOG", it.getString(8))
+                assertEquals("PCSE90001", it.getString(9)); assertEquals("", it.getString(10))
+            }
+        }
+        context.deleteDatabase(name)
+        val game = CatalogItem(Category.GAMES, "PCSE90001", content, "EU", "Version fixture", "https://example.invalid/base", 4)
+        val patch = org.pkgj.android.updates.GamePatch(game.titleId, "01.02", "https://example.invalid/update", 9, "3.60")
+        val ids = mutableListOf<Long>()
+        Store(context).use { store ->
+            store.savePatchCheck(org.pkgj.android.updates.PatchCheck(game.titleId, 12345, patch))
+            store.savePatchCheck(org.pkgj.android.updates.PatchCheck("PCSB90001", 54321, null))
+            val item = patch.downloadItem(game)
+            val first = store.addJob(item, DownloadNames.baseName(item) + ".pkg", tree.toString()); ids += first
+            assertEquals(first, store.addJob(item, "duplicate.pkg", tree.toString()))
+            val newer = patch.copy(version = "01.03").downloadItem(game)
+            val second = store.addJob(newer, DownloadNames.baseName(newer) + ".pkg", tree.toString()); ids += second
+            assertNotEquals(first, second)
+        }
+        Store(context).use { store ->
+            assertEquals(12345L, store.patchCheck(game.titleId)!!.checkedAt)
+            assertEquals(patch, store.patchCheck(game.titleId)!!.patch)
+            assertNull(store.patchCheck("PCSB90001")!!.patch)
+            ids.forEach { assertEquals(DownloadType.UPDATE, store.job(it)!!.downloadType); store.removeJob(it) }
+        }
+    }
+
+    @Test fun downloadingGameAlsoSavesItsUpdateInTheOriginalFolder() {
+        val repo = Repository.get(context)
+        repo.setExportFolder(tree)
+        MockWebServer().use { server ->
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest) = MockResponse().setBody(if (request.path == "/base.pkg") "base-fixture" else "patch-fixture")
+            }
+            val patch = org.pkgj.android.updates.GamePatch("PCSE90001", "01.07", server.url("/patch.pkg").toString(), 13, "3.60")
+            repo.store.savePatchCheck(org.pkgj.android.updates.PatchCheck(patch.titleId, System.currentTimeMillis(), patch))
+            val game = CatalogItem(Category.GAMES, patch.titleId, content, "EU", "Automatic fixture", server.url("/base.pkg").toString(), 12, syntheticLicense().first)
+            repo.queue(game)
+            repo.clearExportFolder() // The worker must retain the game's chosen destination.
+            compose.waitUntil(5_000) { repo.store.jobs().any { it.contentId == content && it.title == game.title } }
+            val baseId = repo.store.jobs().first { it.contentId == content && it.title == game.title }.id
+            val base = awaitJob(baseId) { it.state == JobState.DOWNLOADED }
+            compose.waitUntil(5_000) { repo.store.patchJob(game.titleId, patch.version) != null }
+            val update = awaitJob(repo.store.patchJob(game.titleId, patch.version)!!.id) { it.state == JobState.DOWNLOADED }
+            assertEquals("DONE", base.updateCheck); assertEquals("EU", base.region)
+            assertEquals(base.folderUri, update.folderUri); assertNull(update.licenseUri)
+            assertEquals("[EU-PCSE90001] - Automatic fixture - Update v01.07.pkg", update.filename)
+            assertArrayEquals("base-fixture".toByteArray(), context.contentResolver.openInputStream(Uri.parse(base.packageUri))!!.use { it.readBytes() })
+            assertArrayEquals("patch-fixture".toByteArray(), context.contentResolver.openInputStream(Uri.parse(update.packageUri))!!.use { it.readBytes() })
+            assertEquals("/base.pkg", server.takeRequest().path); assertEquals("/patch.pkg", server.takeRequest().path)
+            repo.deleteCompleted(base); repo.deleteCompleted(update)
+        }
+    }
+
+    @Test fun failedAutomaticCheckDoesNotBlockGameAndCanBeRetriedSeparately() {
+        val repo = Repository.get(context)
+        repo.setExportFolder(tree)
+        repo.store.writableDatabase.delete("update_checks", "titleid=?", arrayOf("PCSE90001"))
+        MockWebServer().use { server ->
+            val game = CatalogItem(Category.GAMES, "PCSE90001", content, "EU", "Check retry fixture", server.url("/base.pkg").toString(), 4, syntheticLicense().first)
+            val id = repo.store.addJob(game, "check-retry.pkg", tree.toString(), checkForUpdate = true)
+            server.enqueue(MockResponse().setResponseCode(503))
+            kotlinx.coroutines.runBlocking { repo.queueGameUpdate(repo.store.job(id)!!, org.pkgj.android.updates.PatchSource { server.url("/manifest").toString() }) }
+            assertEquals("FAILED", repo.store.job(id)!!.updateCheck)
+            assertEquals(JobState.QUEUED, repo.store.job(id)!!.state)
+            server.enqueue(MockResponse().setBody("base"))
+            repo.schedule()
+            val base = awaitJob(id) { it.state == JobState.DOWNLOADED }
+            assertEquals("FAILED", base.updateCheck); assertEquals("Update check HTTP 503", base.updateError)
+            // Retry only discovery from a persisted failed check, without redownloading the game.
+            repo.store.savePatchCheck(org.pkgj.android.updates.PatchCheck(game.titleId, System.currentTimeMillis(), null))
+            repo.retryGameUpdate(base)
+            compose.waitUntil(5_000) { repo.store.job(id)?.updateCheck == "DONE" }
+            assertEquals("", repo.store.job(id)!!.updateError)
+            assertEquals(2, server.requestCount)
+            repo.deleteCompleted(repo.store.job(id)!!)
+        }
+    }
+
+    @Test fun automaticDiscoverySurvivesReopenAndDoesNotResumePausedUpdate() {
+        val repo = Repository.get(context)
+        val game = CatalogItem(Category.GAMES, "PCSE90001", content, "EU", "Persisted auto fixture", "https://example.invalid/base", 4)
+        val patch = org.pkgj.android.updates.GamePatch(game.titleId, "01.08", "https://example.invalid/patch", 4, null)
+        val updateItem = patch.downloadItem(game)
+        val updateId = repo.store.addJob(updateItem, "paused-patch.pkg", tree.toString())
+        repo.store.update(updateId, state = JobState.PAUSED)
+        val baseId = repo.store.addJob(game, "pending-base.pkg", tree.toString(), checkForUpdate = true)
+        Store(context).use { reopened ->
+            val pending = reopened.job(baseId)!!
+            assertEquals("PENDING", pending.updateCheck); assertEquals("EU", pending.region)
+        }
+        repo.store.savePatchCheck(org.pkgj.android.updates.PatchCheck(game.titleId, System.currentTimeMillis(), patch))
+        kotlinx.coroutines.runBlocking { repo.queueGameUpdate(repo.store.job(baseId)!!) }
+        assertEquals("DONE", repo.store.job(baseId)!!.updateCheck)
+        assertEquals(JobState.PAUSED, repo.store.job(updateId)!!.state)
+        assertEquals(1, repo.store.jobs().count { it.downloadType == DownloadType.UPDATE && it.patchVersion == patch.version })
+        repo.store.removeJob(baseId); repo.store.removeJob(updateId)
+    }
+
+    @Test fun databaseVersion7MigrationPreservesJobsWithoutAutomaticOptIn() {
+        val file = context.getDatabasePath("auto-update-migration.db")
+        context.deleteDatabase(file.name)
+        android.database.sqlite.SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            db.execSQL("CREATE TABLE jobs(id INTEGER PRIMARY KEY,state TEXT,error TEXT)")
+            db.execSQL("INSERT INTO jobs VALUES(99,'DOWNLOADED','Existing warning')")
+            Store(context).use { it.onUpgrade(db, 7, 8) }
+            db.rawQuery("SELECT id,state,error,update_check,update_error,region FROM jobs", null).use {
+                assertTrue(it.moveToFirst()); assertEquals(99L, it.getLong(0)); assertEquals("DOWNLOADED", it.getString(1))
+                assertEquals("Existing warning", it.getString(2)); assertEquals("", it.getString(3))
+                assertEquals("", it.getString(4)); assertEquals("", it.getString(5))
+            }
+        }
+        context.deleteDatabase(file.name)
+    }
+
+    @Test fun controllerCanDownloadCachedPatchWithoutRifOrBaseCollision() {
+        val repo = Repository.get(context)
+        repo.setExportFolder(tree)
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("patch-fixture"))
+            val patch = org.pkgj.android.updates.GamePatch("PCSE90001", "01.02", server.url("/patch.pkg").toString(), 13, "3.65")
+            repo.store.savePatchCheck(org.pkgj.android.updates.PatchCheck(patch.titleId, System.currentTimeMillis(), patch))
+            // Also exercises the Android XML parser and its external-entity protection.
+            val xml = "<titlepatch titleid=\"PCSE90001\"><tag><package version=\"01.02\" url=\"https://example.invalid/patch\"/></tag></titlepatch>"
+            assertEquals("01.02", org.pkgj.android.updates.PatchXml.parse(xml.byteInputStream(), patch.titleId)!!.version)
+            assertThrows(org.pkgj.android.updates.PatchManifestException::class.java) {
+                org.pkgj.android.updates.PatchXml.parse(("<!DOCTYPE titlepatch [<!ENTITY x SYSTEM 'file:///etc/passwd'>]>" + xml).byteInputStream(), patch.titleId)
+            }
+            compose.onNodeWithText("Alpha").performSemanticsAction(SemanticsActions.RequestFocus)
+            key(KeyEvent.KEYCODE_BUTTON_A)
+            compose.onNodeWithText("Update v01.02").assertExists()
+            compose.onNodeWithText("Firmware 3.65", substring = true).assertExists()
+            key(KeyEvent.KEYCODE_DPAD_UP)
+            if (compose.onAllNodesWithContentDescription("Refresh update").fetchSemanticsNodes().any { it.config.getOrElse(androidx.compose.ui.semantics.SemanticsProperties.Focused) { false } })
+                key(KeyEvent.KEYCODE_DPAD_LEFT)
+            compose.onNodeWithText("Download update").assertIsFocused()
+            key(KeyEvent.KEYCODE_BUTTON_A)
+            compose.waitUntil(5_000) { repo.store.patchJob(patch.titleId, patch.version) != null }
+            val job = awaitJob(repo.store.patchJob(patch.titleId, patch.version)!!.id) { it.state == JobState.DOWNLOADED }
+            assertEquals(DownloadType.UPDATE, job.downloadType); assertFalse(job.needsLicense)
+            assertEquals("", job.zrif); assertEquals("", job.error); assertNull(job.licenseUri)
+            assertFalse(job.licenseExported); assertTrue(job.filename.endsWith(" - Update v01.02.pkg"))
+            assertFalse(repo.hasCatalogLicense(job)); assertNull(repo.ensureLicense(job))
+            assertArrayEquals("patch-fixture".toByteArray(), context.contentResolver.openInputStream(Uri.parse(job.packageUri))!!.use { it.readBytes() })
+            assertFalse(File(repo.downloadsDir, job.filename).exists())
+            repo.deleteCompleted(job)
+        }
+    }
+
     @Test fun controllerCanLeaveSearchNavigateRowsAndOpenCloseDetails() {
         compose.activityRule.scenario.onActivity { it.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE }
         compose.waitUntil(5_000) {
@@ -196,9 +397,9 @@ class DeviceTests {
 
     @Test fun databaseUpgradePreservesExistingDownloadRecords() {
         android.database.sqlite.SQLiteDatabase.create(null).use { db ->
-            db.execSQL("CREATE TABLE jobs(id INTEGER PRIMARY KEY,title TEXT,state TEXT)")
-            db.execSQL("INSERT INTO jobs VALUES(1,'Existing download','DOWNLOADED')")
-            Store(context).use { it.onUpgrade(db, 5, 6) }
+            db.execSQL("CREATE TABLE jobs(id INTEGER PRIMARY KEY,title TEXT,state TEXT,content TEXT)")
+            db.execSQL("INSERT INTO jobs VALUES(1,'Existing download','DOWNLOADED','UP0000-PCSE90001_00-0000000000000000')")
+            Store(context).use { it.onUpgrade(db, 5, 8) }
             db.rawQuery("SELECT title,state,folder_uri,package_uri,license_uri,transfer_complete FROM jobs", null).use {
                 assertTrue(it.moveToFirst()); assertEquals("Existing download", it.getString(0))
                 assertEquals("DOWNLOADED", it.getString(1)); assertTrue(it.isNull(2)); assertEquals(0, it.getInt(5))

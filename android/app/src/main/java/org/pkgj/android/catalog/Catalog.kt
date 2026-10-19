@@ -31,7 +31,7 @@ val VitaCategories = Category.entries.filter { it.vita3kRelevant }
 data class CatalogItem(
     val category: Category, val titleId: String, val contentId: String,
     val region: String, val title: String, val url: String, val size: Long?, val zrif: String = "",
-    val version: String = ""
+    val version: String = "", val downloadType: org.pkgj.android.download.DownloadType = org.pkgj.android.download.DownloadType.CATALOG
 )
 
 data class ParseStats(val rows: Int, val accepted: Int, val malformed: Int)

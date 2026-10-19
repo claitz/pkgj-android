@@ -13,7 +13,11 @@ object DownloadNames {
         val title = limitUtf8(cleanTitle, 120).trim(' ', '.').ifEmpty { "Untitled" }
         val version = item.version.trim().removePrefix("v").removePrefix("V")
             .takeIf { it != "0" && it.matches(Regex("[0-9]+(\\.[0-9]+)*")) }
-        return "[$region-$titleId] - $title${version?.let { " v$it" }.orEmpty()}"
+        val suffix = if (item.downloadType == DownloadType.UPDATE) {
+            requireNotNull(version) { "Update version is required" }
+            " - Update v$version"
+        } else version?.let { " v$it" }.orEmpty()
+        return "[$region-$titleId] - $title$suffix"
     }
 
     private fun limitUtf8(value: String, limit: Int): String {

@@ -10,17 +10,20 @@ import android.database.sqlite.SQLiteOpenHelper
 import androidx.paging.PagingSource
 import androidx.paging.PagingState
 import org.pkgj.android.catalog.*
+import org.pkgj.android.download.DownloadType
+import org.pkgj.android.updates.*
 import org.pkgj.android.download.DownloadJob
 import org.pkgj.android.download.JobState
 import org.pkgj.android.download.JobTransitions
 import org.pkgj.android.compatibility.CompatibilityReport
 
-class Store(context: Context) : SQLiteOpenHelper(context, "pkgj_android.db", null, 6) {
+class Store(context: Context) : SQLiteOpenHelper(context, "pkgj_android.db", null, 8) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("CREATE TABLE catalog(category TEXT NOT NULL,content TEXT NOT NULL,titleid TEXT NOT NULL,region TEXT NOT NULL,title TEXT NOT NULL,url TEXT NOT NULL,size INTEGER,zrif TEXT NOT NULL DEFAULT '',version TEXT NOT NULL DEFAULT '',PRIMARY KEY(category,content))")
         db.execSQL("CREATE INDEX catalog_title ON catalog(title COLLATE NOCASE)")
-        db.execSQL("CREATE TABLE jobs(id INTEGER PRIMARY KEY AUTOINCREMENT,category TEXT NOT NULL,content TEXT NOT NULL,title TEXT NOT NULL,url TEXT NOT NULL,filename TEXT NOT NULL,state TEXT NOT NULL,bytes INTEGER NOT NULL DEFAULT 0,total INTEGER,etag TEXT,error TEXT,speed INTEGER NOT NULL DEFAULT 0,exported INTEGER NOT NULL DEFAULT 0,zrif TEXT NOT NULL DEFAULT '',license_exported INTEGER NOT NULL DEFAULT 0,folder_uri TEXT,package_uri TEXT,license_uri TEXT,transfer_complete INTEGER NOT NULL DEFAULT 0)")
+        db.execSQL("CREATE TABLE jobs(id INTEGER PRIMARY KEY AUTOINCREMENT,category TEXT NOT NULL,content TEXT NOT NULL,title TEXT NOT NULL,url TEXT NOT NULL,filename TEXT NOT NULL,state TEXT NOT NULL,bytes INTEGER NOT NULL DEFAULT 0,total INTEGER,etag TEXT,error TEXT,speed INTEGER NOT NULL DEFAULT 0,exported INTEGER NOT NULL DEFAULT 0,zrif TEXT NOT NULL DEFAULT '',license_exported INTEGER NOT NULL DEFAULT 0,folder_uri TEXT,package_uri TEXT,license_uri TEXT,transfer_complete INTEGER NOT NULL DEFAULT 0,type TEXT NOT NULL DEFAULT 'CATALOG',titleid TEXT NOT NULL DEFAULT '',patch_version TEXT NOT NULL DEFAULT '',update_check TEXT NOT NULL DEFAULT '',update_error TEXT NOT NULL DEFAULT '',region TEXT NOT NULL DEFAULT '')")
         db.execSQL("CREATE TABLE compatibility(titleid TEXT PRIMARY KEY COLLATE NOCASE,issue_id INTEGER NOT NULL,status TEXT NOT NULL,updated_at INTEGER NOT NULL)")
+        createUpdates(db)
     }
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) {
@@ -36,6 +39,39 @@ class Store(context: Context) : SQLiteOpenHelper(context, "pkgj_android.db", nul
             db.execSQL("ALTER TABLE jobs ADD COLUMN license_uri TEXT")
             db.execSQL("ALTER TABLE jobs ADD COLUMN transfer_complete INTEGER NOT NULL DEFAULT 0")
         }
+        if (oldVersion < 7) {
+            db.execSQL("ALTER TABLE jobs ADD COLUMN type TEXT NOT NULL DEFAULT 'CATALOG'")
+            db.execSQL("ALTER TABLE jobs ADD COLUMN titleid TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE jobs ADD COLUMN patch_version TEXT NOT NULL DEFAULT ''")
+            db.execSQL("UPDATE jobs SET titleid=substr(content,8,9) WHERE length(content)>=16")
+            createUpdates(db)
+        }
+        if (oldVersion < 8) {
+            db.execSQL("ALTER TABLE jobs ADD COLUMN update_check TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE jobs ADD COLUMN update_error TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE jobs ADD COLUMN region TEXT NOT NULL DEFAULT ''")
+        }
+    }
+
+    private fun createUpdates(db: SQLiteDatabase) {
+        db.execSQL("CREATE UNIQUE INDEX jobs_update_identity ON jobs(titleid,patch_version) WHERE type='UPDATE'")
+        db.execSQL("CREATE TABLE update_checks(titleid TEXT PRIMARY KEY,checked_at INTEGER NOT NULL,version TEXT,url TEXT,size INTEGER,firmware TEXT)")
+    }
+    fun patchCheck(titleId: String): PatchCheck? = readableDatabase.rawQuery(
+        "SELECT checked_at,version,url,size,firmware FROM update_checks WHERE titleid=?", arrayOf(titleId)).use { c ->
+        if (!c.moveToFirst()) null else PatchCheck(titleId, c.getLong(0), if (c.isNull(1)) null else
+            GamePatch(titleId, c.getString(1), c.getString(2), if (c.isNull(3)) null else c.getLong(3), c.getString(4)))
+    }
+    fun savePatchCheck(check: PatchCheck) {
+        writableDatabase.insertWithOnConflict("update_checks", null, ContentValues().apply {
+            put("titleid", check.titleId); put("checked_at", check.checkedAt)
+            put("version", check.patch?.version); put("url", check.patch?.url)
+            check.patch?.size?.let { put("size", it) } ?: putNull("size")
+            put("firmware", check.patch?.requiredFirmware)
+        }, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+    fun patchJob(titleId: String, version: String): DownloadJob? = jobs().firstOrNull {
+        it.downloadType == DownloadType.UPDATE && it.titleId == titleId && it.patchVersion == version
     }
 
     fun replaceCompatibility(reports: List<CompatibilityReport>) {
@@ -105,19 +141,34 @@ class Store(context: Context) : SQLiteOpenHelper(context, "pkgj_android.db", nul
         override fun getRefreshKey(state: PagingState<Int, CatalogItem>): Int? = state.anchorPosition
     }
 
-    fun addJob(item: CatalogItem, filename: String, folderUri: String? = null): Long {
+    fun addJob(item: CatalogItem, filename: String, folderUri: String? = null, checkForUpdate: Boolean = false): Long {
         val db = writableDatabase
-        return db.insert("jobs", null, ContentValues().apply {
+        if (item.downloadType == DownloadType.UPDATE) {
+            require(item.category == Category.GAMES && PatchUrls.validTitleId(item.titleId) && PatchXml.validVersion(item.version)) { "Invalid update job" }
+            require(item.zrif.isEmpty() && item.contentId == "update:${item.titleId}:${item.version}") { "Invalid update identity" }
+        }
+        val id = db.insertWithOnConflict("jobs", null, ContentValues().apply {
             put("category", item.category.name); put("content", item.contentId); put("title", item.title)
             put("url", item.url); put("filename", filename); put("state", JobState.QUEUED.name); put("zrif", item.zrif); put("folder_uri", folderUri)
-        })
+            put("type", item.downloadType.name); put("titleid", item.titleId); put("region", item.region)
+            put("patch_version", if (item.downloadType == DownloadType.UPDATE) item.version else "")
+            put("update_check", if (checkForUpdate && item.category == Category.GAMES && item.downloadType == DownloadType.CATALOG) "PENDING" else "")
+        }, SQLiteDatabase.CONFLICT_IGNORE)
+        return if (id >= 0) id else if (item.downloadType == DownloadType.UPDATE)
+            patchJob(item.titleId, item.version)?.id ?: error("Could not queue update") else error("Could not queue download")
     }
     fun jobs(): List<DownloadJob> {
         val out = mutableListOf<DownloadJob>()
-        readableDatabase.rawQuery("SELECT id,category,content,title,url,filename,state,bytes,total,etag,error,speed,exported,zrif,license_exported,folder_uri,package_uri,license_uri,transfer_complete FROM jobs ORDER BY id DESC", null).use { c ->
-            while (c.moveToNext()) out += DownloadJob(c.getLong(0), Category.valueOf(c.getString(1)), c.getString(2), c.getString(3), c.getString(4), c.getString(5), JobState.valueOf(c.getString(6)), c.getLong(7), if(c.isNull(8)) null else c.getLong(8), c.getString(9), c.getString(10), c.getLong(11), c.getInt(12) != 0, c.getString(13), c.getInt(14) != 0, c.getString(15), c.getString(16), c.getString(17), c.getInt(18) != 0)
+        readableDatabase.rawQuery("SELECT id,category,content,title,url,filename,state,bytes,total,etag,error,speed,exported,zrif,license_exported,folder_uri,package_uri,license_uri,transfer_complete,type,titleid,patch_version,update_check,update_error,region FROM jobs ORDER BY id DESC", null).use { c ->
+            while (c.moveToNext()) out += DownloadJob(c.getLong(0), Category.valueOf(c.getString(1)), c.getString(2), c.getString(3), c.getString(4), c.getString(5), JobState.valueOf(c.getString(6)), c.getLong(7), if(c.isNull(8)) null else c.getLong(8), c.getString(9), c.getString(10), c.getLong(11), c.getInt(12) != 0, c.getString(13), c.getInt(14) != 0, c.getString(15), c.getString(16), c.getString(17), c.getInt(18) != 0, DownloadType.valueOf(c.getString(19)), c.getString(20), c.getString(21), c.getString(22), c.getString(23), c.getString(24))
         }
         return out
+    }
+    fun setUpdateCheck(id: Long, state: String, error: String = "") {
+        require(state in setOf("PENDING", "DONE", "FAILED"))
+        writableDatabase.update("jobs", ContentValues().apply {
+            put("update_check", state); put("update_error", error)
+        }, "id=? AND type='CATALOG' AND category='GAMES' AND state!='CANCELED'", arrayOf(id.toString()))
     }
     fun job(id: Long) = jobs().firstOrNull { it.id == id }
     fun setFilename(id: Long, filename: String) {
