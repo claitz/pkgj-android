@@ -3,6 +3,8 @@
 package org.pkgj.android.compatibility
 
 import org.json.JSONArray
+import org.pkgj.android.catalog.Platform
+import org.pkgj.android.catalog.Category
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
 import java.io.BufferedReader
@@ -14,8 +16,21 @@ data class CompatibilityReport(
     val titleId: String,
     val issueId: Long,
     val status: String,
-    val updatedAt: Long
-)
+    val updatedAt: Long,
+    val platform: Platform = Platform.VITA
+) {
+    val key get() = CompatibilityKey(platform, titleId)
+}
+
+data class CompatibilityKey(val platform: Platform, val titleId: String)
+val Category.hasCompatibility get() = this == Category.GAMES || this == Category.PS3_GAMES
+
+fun compatibilityUrl(titleId: String, platform: Platform, report: CompatibilityReport?): String {
+    val id = java.net.URLEncoder.encode(titleId, "UTF-8")
+    return if (platform == Platform.PS3) "https://rpcs3.net/compatibility?g=$id"
+    else report?.let { "https://github.com/Vita3K/compatibility/issues/${it.issueId}" }
+        ?: "https://github.com/Vita3K/compatibility/issues?q=$id"
+}
 
 data class CompatibilityDatabase(val updatedAt: String, val reports: List<CompatibilityReport>)
 data class CompatibilityDownload(val database: CompatibilityDatabase, val etag: String?, val lastModified: String?)

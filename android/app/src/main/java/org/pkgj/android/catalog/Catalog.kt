@@ -132,17 +132,18 @@ fun CatalogFilter.sqlWhere(): Pair<String, Array<String>> {
     val allowed = selectedPlatform.categories()
     parts += "category IN (${allowed.joinToString(",") { "?" }})"
     args += allowed.map { it.name }
-    if (selectedPlatform == Platform.VITA && (category == "All" || category == Category.GAMES.name) && compatibilityStatuses.isNotEmpty()) {
-        parts += "category='GAMES'"
+    val gameCategory = when (selectedPlatform) { Platform.VITA -> Category.GAMES; Platform.PS3 -> Category.PS3_GAMES; else -> null }
+    if (gameCategory != null && (category == "All" || category == gameCategory.name) && compatibilityStatuses.isNotEmpty()) {
+        parts += "category='${gameCategory.name}'"
         val alternatives = mutableListOf<String>()
         val reported = (compatibilityStatuses - "Unreported").sorted()
         if (reported.isNotEmpty()) {
-            alternatives += "EXISTS (SELECT 1 FROM compatibility c WHERE c.titleid=catalog.titleid AND (" +
+            alternatives += "EXISTS (SELECT 1 FROM compatibility c WHERE c.platform='${selectedPlatform.name}' AND c.titleid=catalog.titleid AND (" +
                 reported.joinToString(" OR ") { "instr(' / ' || c.status || ' / ', ' / ' || ? || ' / ') > 0" } + "))"
             args += reported
         }
         if ("Unreported" in compatibilityStatuses)
-            alternatives += "NOT EXISTS (SELECT 1 FROM compatibility c WHERE c.titleid=catalog.titleid)"
+            alternatives += "NOT EXISTS (SELECT 1 FROM compatibility c WHERE c.platform='${selectedPlatform.name}' AND c.titleid=catalog.titleid)"
         parts += alternatives.joinToString(" OR ", "(", ")")
     }
     return (if (parts.isEmpty()) "" else "WHERE " + parts.joinToString(" AND ")) to args.toTypedArray()

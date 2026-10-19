@@ -34,11 +34,17 @@ class Repository private constructor(private val context: Context) {
     private val _catalogVersion = MutableStateFlow(0)
     val catalogVersion: StateFlow<Int> = _catalogVersion
     private val _compatibility = MutableStateFlow(store.compatibilityReports())
-    val compatibility: StateFlow<Map<String, CompatibilityReport>> = _compatibility
+    val compatibility: StateFlow<Map<CompatibilityKey, CompatibilityReport>> = _compatibility
     private val _compatibilityDatabaseDate = MutableStateFlow(prefs.getString("compatibilityDatabaseDate", null))
     val compatibilityDatabaseDate: StateFlow<String?> = _compatibilityDatabaseDate
+    private val _rpcs3DatabaseDate = MutableStateFlow(prefs.getString("rpcs3DatabaseDate", null))
+    val rpcs3DatabaseDate: StateFlow<String?> = _rpcs3DatabaseDate
+    private val compatibilityMutex = kotlinx.coroutines.sync.Mutex()
     val compatibilitySyncing = MutableStateFlow(false)
-    val exportFolder = MutableStateFlow(prefs.getString("exportFolder", null))
+    private val folderPreferences = DownloadFolders(prefs)
+    private val _downloadFolders = MutableStateFlow(folderPreferences.read())
+    val downloadFolders: StateFlow<Map<Platform, String>> = _downloadFolders
+    fun downloadFolder(platform: Platform): String? = downloadFolders.value[platform]
     val status = MutableStateFlow<String?>(null)
     val loading = MutableStateFlow(false)
     val syncing = MutableStateFlow(false)
@@ -60,7 +66,8 @@ class Repository private constructor(private val context: Context) {
                 .remove("refresh_${Category.GAMES.name}").remove("refresh_${Category.DEMOS.name}").apply()
         }
         store.resetInterrupted(); refreshJobs(); schedule()
-        scope.launch { syncCatalogs(); repairDownloadedLicenses(); syncCompatibility() }
+        scope.launch { syncCatalogs(); repairDownloadedLicenses() }
+        scope.launch { syncCompatibility() }
     }
 
     private fun repairDownloadedLicenses() {
@@ -118,25 +125,37 @@ class Repository private constructor(private val context: Context) {
     fun refreshCompatibility() { scope.launch { syncCompatibility() } }
 
     private suspend fun syncCompatibility() {
-        if (compatibilitySyncing.value) return
+        if (!compatibilityMutex.tryLock()) return
         compatibilitySyncing.value = true
         try {
-            val download = CompatibilityDataSource.checkForUpdates(
-                prefs.getString("compatibilityAssetEtag", null),
-                prefs.getString("compatibilityAssetModified", null))
-            if (download == null) return
-            store.replaceCompatibility(download.database.reports)
-            prefs.edit().putString("compatibilityAssetEtag", download.etag)
-                .putString("compatibilityAssetModified", download.lastModified)
-                .putString("compatibilityDatabaseDate", download.database.updatedAt).apply()
-            _compatibility.value = store.compatibilityReports()
-            _catalogVersion.value++
-            _compatibilityDatabaseDate.value = download.database.updatedAt
-            status.value = "Compatibility updated"
-        } catch (e: Exception) {
-            android.util.Log.w("PKGjCompatibility", "Compatibility update failed (${e::class.java.simpleName})")
-            status.value = "Compatibility update failed"
-        } finally { compatibilitySyncing.value = false }
+            for (platform in listOf(Platform.VITA, Platform.PS3)) {
+                val prefix = if (platform == Platform.VITA) "compatibilityAsset" else "rpcs3Asset"
+                val dateKey = if (platform == Platform.VITA) "compatibilityDatabaseDate" else "rpcs3DatabaseDate"
+                val source = if (platform == Platform.VITA) "Vita3K" else "RPCS3"
+                try {
+                    val hasCache = _compatibility.value.keys.any { it.platform == platform }
+                    val etag = if (hasCache) prefs.getString("${prefix}Etag", null) else null
+                    val modified = if (hasCache) prefs.getString("${prefix}Modified", null) else null
+                    val download = if (platform == Platform.VITA) CompatibilityDataSource.checkForUpdates(etag, modified)
+                        else Rpcs3CompatibilityDataSource().checkForUpdates(etag, modified)
+                    if (download == null) continue
+                    store.replaceCompatibility(download.database.reports, platform)
+                    prefs.edit().putString("${prefix}Etag", download.etag)
+                        .putString("${prefix}Modified", download.lastModified)
+                        .putString(dateKey, download.database.updatedAt).apply()
+                    _compatibility.value = store.compatibilityReports()
+                    _catalogVersion.value++
+                    if (platform == Platform.VITA) _compatibilityDatabaseDate.value = download.database.updatedAt
+                    else _rpcs3DatabaseDate.value = download.database.updatedAt
+                } catch (e: Exception) {
+                    android.util.Log.w("PKGjCompatibility", "$source update failed (${e::class.java.simpleName})")
+                    status.value = "$source compatibility update failed"
+                }
+            }
+        } finally {
+            compatibilitySyncing.value = false
+            compatibilityMutex.unlock()
+        }
     }
 
     suspend fun import(uri: Uri, category: Category): ParseStats = withContext(Dispatchers.IO) {
@@ -197,8 +216,10 @@ class Repository private constructor(private val context: Context) {
     fun queue(items: List<CatalogItem>) {
         require(items.isNotEmpty() && items.all { it.category.supported }) { "Unsupported platform" }
         if (items.any { !CatalogParser.usableUrl(it.url) }) { status.value = "No download URL"; return }
-        val folder = exportFolder.value ?: run { status.value = "Choose a download folder in Settings"; return }
-        items.asReversed().forEach { enqueueDownload(it, folder) }
+        val folders = downloadFolders.value
+        val missing = items.firstOrNull { folders[it.category.platform] == null }
+        if (missing != null) { status.value = "Choose a ${missing.category.platform.label} folder in Settings"; return }
+        items.asReversed().forEach { enqueueDownload(it, folders.getValue(it.category.platform)) }
         refreshJobs(); schedule()
     }
 
@@ -391,11 +412,17 @@ class Repository private constructor(private val context: Context) {
         }
     }
 
-    fun setExportFolder(uri: Uri) {
+    fun setExportFolder(uri: Uri, platform: Platform = Platform.VITA) {
         context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-        prefs.edit().putString("exportFolder", uri.toString()).apply(); exportFolder.value = uri.toString()
+        folderPreferences.set(platform, uri.toString()); _downloadFolders.value = folderPreferences.read()
     }
-    fun clearExportFolder() { prefs.edit().remove("exportFolder").apply(); exportFolder.value = null }
+    fun clearExportFolder(platform: Platform = Platform.VITA) {
+        folderPreferences.set(platform, null); _downloadFolders.value = folderPreferences.read()
+    }
+    suspend fun clearDownloadHistory() = withContext(Dispatchers.IO) {
+        store.clearDownloadHistory()
+        refreshJobs()
+    }
     private fun copyToUri(file: File, uri: Uri) {
         context.contentResolver.openOutputStream(uri, "wt")!!.use { out -> file.inputStream().use { it.copyTo(out) } }
     }
@@ -419,7 +446,7 @@ class Repository private constructor(private val context: Context) {
         store.update(job.id, licenseExported = true, error = ""); refreshJobs()
     }
     suspend fun exportToFolder(job: DownloadJob): Boolean = withContext(Dispatchers.IO) {
-        val folder = exportFolder.value ?: return@withContext false
+        val folder = downloadFolder(job.category.platform) ?: return@withContext false
         require(job.state == JobState.DOWNLOADED) { "Download is unavailable" }
         val tree = DocumentFile.fromTreeUri(context, Uri.parse(folder)) ?: error("Export folder unavailable")
         val pkg = File(downloadsDir, job.filename)

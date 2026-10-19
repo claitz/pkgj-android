@@ -49,7 +49,7 @@ import androidx.paging.LoadState
 import androidx.paging.compose.collectAsLazyPagingItems
 import androidx.paging.compose.itemKey
 import org.pkgj.android.catalog.*
-import org.pkgj.android.compatibility.CompatibilityReport
+import org.pkgj.android.compatibility.*
 import org.pkgj.android.data.Repository
 
 private val CompatibilityOptions = listOf("All", "Playable", "Ingame +", "Ingame -", "Menu", "Intro", "Bootable", "Nothing", "Unreported")
@@ -57,7 +57,7 @@ private val CategoryNames = mapOf("All" to "All content") + Category.entries.ass
 
 @Composable
 internal fun LibraryScreen(repository: Repository, listState: LazyListState,
-    compatibility: Map<String, CompatibilityReport>, filter: CatalogFilter, pages: Flow<PagingData<CatalogItem>>,
+    compatibility: Map<CompatibilityKey, CompatibilityReport>, filter: CatalogFilter, pages: Flow<PagingData<CatalogItem>>,
     navigationFocus: FocusRequester, onFilter: (CatalogFilter) -> Unit, onSelect: (CatalogItem) -> Unit) {
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -165,8 +165,8 @@ internal fun LibraryScreen(repository: Repository, listState: LazyListState,
                     MultiFilterMenu("Region", regions, listOf("US", "EU", "JP", "ASIA", "INT"), "All regions",
                         modifier = Modifier.focusProperties { up = searchFocus; if (listReady && paging.itemCount > 0) down = listFocus }.then(filterNavigation),
                         onSelect = { onFilter(filter.copy(regions = it)) })
-                    if (category == Category.GAMES.name) MultiFilterMenu("Compatibility", statuses, CompatibilityOptions.filter { it != "All" }, "Any status",
-                        color = ::compatibilityColor,
+                    if (category == Category.GAMES.name || category == Category.PS3_GAMES.name) MultiFilterMenu("Compatibility", statuses, if (filter.platform == Platform.PS3) Rpcs3CompatibilityJson.statuses + "Unreported" else CompatibilityOptions.filter { it != "All" }, "Any status",
+                        color = { compatibilityColor(it, filter.platform) },
                         modifier = Modifier.focusProperties { up = searchFocus; if (listReady && paging.itemCount > 0) down = listFocus }.then(filterNavigation),
                         onSelect = { onFilter(filter.copy(compatibilityStatuses = it)) })
                     FilterMenu("Sort", sort, listOf("Title", "Size"), label = { "Sort: $it" }, onSelect = { onFilter(filter.copy(sort = it)) },
@@ -193,7 +193,7 @@ internal fun LibraryScreen(repository: Repository, listState: LazyListState,
             else -> LazyColumn(modifier = Modifier.focusGroup(), state = listState, contentPadding = PaddingValues(bottom = 16.dp)) {
                 items(count = paging.itemCount, key = paging.itemKey { "${it.category}:${it.contentId}" }) { index ->
                     val item = paging[index] ?: return@items
-                    LibraryRow(item, showCategory = category == "All", compact = androidx.compose.ui.platform.LocalConfiguration.current.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE, report = if (item.category == Category.GAMES) compatibility[item.titleId] else null,
+                    LibraryRow(item, showCategory = category == "All", compact = androidx.compose.ui.platform.LocalConfiguration.current.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE, report = if (item.category.hasCompatibility) compatibility[CompatibilityKey(item.category.platform, item.titleId)] else null,
                         modifier = (if (index == listState.firstVisibleItemIndex) Modifier.focusRequester(listFocus).onGloballyPositioned { listReady = true } else Modifier)
                             .then(if (index == pendingPageIndex) Modifier.focusRequester(pageFocus) else Modifier)
                             .focusProperties { if (index == 0) up = categoryFocus }) { onSelect(item) }
@@ -287,11 +287,11 @@ private fun LibraryRow(item: CatalogItem, showCategory: Boolean, compact: Boolea
                     color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, maxLines = 1)
             }
             if (compact) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                if (report != null) CompatibilityPill(report.status)
+                if (report != null) CompatibilityPill(report.status, report.platform)
                 Text(item.size?.let(::sizeLabel) ?: "", modifier = Modifier.width(68.dp), textAlign = androidx.compose.ui.text.style.TextAlign.End,
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                if (report != null) CompatibilityPill(report.status)
+                if (report != null) CompatibilityPill(report.status, report.platform)
                 item.size?.let { Text(sizeLabel(it), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
         }
@@ -299,7 +299,13 @@ private fun LibraryRow(item: CatalogItem, showCategory: Boolean, compact: Boolea
     HorizontalDivider(Modifier.padding(horizontal = 12.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .22f))
 }
 
-internal fun compatibilityColor(status: String): Color = when (status) {
+internal fun compatibilityColor(status: String, platform: Platform = Platform.VITA): Color = if (platform == Platform.PS3) when (status) {
+    "Playable" -> Color(0xFF1EBC61)
+    "Ingame" -> Color(0xFFF9B32F)
+    "Intro" -> Color(0xFFE08A1E)
+    "Loadable" -> Color(0xFFE74C3C)
+    else -> Color(0xFF9AA3B0)
+} else when (status) {
     "Playable" -> Color(0xFF60C783)
     "Ingame +" -> Color(0xFFA2C65C)
     "Ingame -" -> Color(0xFFE4BF56)
@@ -313,10 +319,10 @@ internal fun compatibilityColor(status: String): Color = when (status) {
 private fun StatusDot(color: Color) { Box(Modifier.size(8.dp).background(color, CircleShape)) }
 
 @Composable
-internal fun CompatibilityPill(status: String) {
+internal fun CompatibilityPill(status: String, platform: Platform = Platform.VITA) {
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         status.split(" / ").forEach { label ->
-            val color = compatibilityColor(label)
+            val color = compatibilityColor(label, platform)
             Surface(color = color.copy(alpha = .14f), contentColor = color, shape = CircleShape) {
                 Text(label, Modifier.padding(horizontal = 9.dp, vertical = 3.dp), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
             }

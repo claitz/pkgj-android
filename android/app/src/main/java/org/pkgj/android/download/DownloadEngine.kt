@@ -23,6 +23,10 @@ data class DownloadJob(val id: Long, val category: Category, val contentId: Stri
     val identity get() = if (downloadType == DownloadType.UPDATE) org.pkgj.android.updates.GamePatch(titleId, patchVersion, url, total, null, category.platform, patchPart).identity else "catalog:${category.name}:$contentId"
 }
 
+val DownloadJob.isHistory: Boolean get() =
+    (state == JobState.DOWNLOADED && folderUri != null && updateCheck !in setOf("PENDING", "FAILED")) ||
+        (state == JobState.CANCELED && bytes == 0L && error.isNullOrEmpty())
+
 object JobTransitions {
     fun canMove(from: JobState, to: JobState) = when (from) {
         JobState.QUEUED -> to in setOf(JobState.RUNNING, JobState.CANCELED, JobState.PAUSED)

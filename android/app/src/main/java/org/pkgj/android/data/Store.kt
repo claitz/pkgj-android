@@ -16,13 +16,14 @@ import org.pkgj.android.download.DownloadJob
 import org.pkgj.android.download.JobState
 import org.pkgj.android.download.JobTransitions
 import org.pkgj.android.compatibility.CompatibilityReport
+import org.pkgj.android.compatibility.CompatibilityKey
 
-class Store(context: Context, databaseName: String = "pkgj_android.db") : SQLiteOpenHelper(context, databaseName, null, 9) {
+class Store(context: Context, databaseName: String = "pkgj_android.db") : SQLiteOpenHelper(context, databaseName, null, 10) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("CREATE TABLE catalog(category TEXT NOT NULL,content TEXT NOT NULL,titleid TEXT NOT NULL,region TEXT NOT NULL,title TEXT NOT NULL,url TEXT NOT NULL,size INTEGER,zrif TEXT NOT NULL DEFAULT '',version TEXT NOT NULL DEFAULT '',rap TEXT NOT NULL DEFAULT '',PRIMARY KEY(category,content))")
         db.execSQL("CREATE INDEX catalog_title ON catalog(title COLLATE NOCASE)")
         db.execSQL("CREATE TABLE jobs(id INTEGER PRIMARY KEY AUTOINCREMENT,category TEXT NOT NULL,content TEXT NOT NULL,title TEXT NOT NULL,url TEXT NOT NULL,filename TEXT NOT NULL,state TEXT NOT NULL,bytes INTEGER NOT NULL DEFAULT 0,total INTEGER,etag TEXT,error TEXT,speed INTEGER NOT NULL DEFAULT 0,exported INTEGER NOT NULL DEFAULT 0,zrif TEXT NOT NULL DEFAULT '',license_exported INTEGER NOT NULL DEFAULT 0,folder_uri TEXT,package_uri TEXT,license_uri TEXT,transfer_complete INTEGER NOT NULL DEFAULT 0,type TEXT NOT NULL DEFAULT 'CATALOG',titleid TEXT NOT NULL DEFAULT '',patch_version TEXT NOT NULL DEFAULT '',update_check TEXT NOT NULL DEFAULT '',update_error TEXT NOT NULL DEFAULT '',region TEXT NOT NULL DEFAULT '',rap TEXT NOT NULL DEFAULT '',patch_part INTEGER NOT NULL DEFAULT 0)")
-        db.execSQL("CREATE TABLE compatibility(titleid TEXT PRIMARY KEY COLLATE NOCASE,issue_id INTEGER NOT NULL,status TEXT NOT NULL,updated_at INTEGER NOT NULL)")
+        createCompatibility(db)
         createUpdates(db)
     }
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -63,6 +64,16 @@ class Store(context: Context, databaseName: String = "pkgj_android.db") : SQLite
             db.execSQL("INSERT INTO update_packages SELECT 'VITA',titleid,0,version,url,size,firmware,0 FROM old_update_checks WHERE version IS NOT NULL")
             db.execSQL("DROP TABLE old_update_checks")
         }
+        if (oldVersion < 10 && newVersion >= 10) {
+            db.execSQL("ALTER TABLE compatibility RENAME TO old_compatibility")
+            createCompatibility(db)
+            db.execSQL("INSERT INTO compatibility SELECT 'VITA',titleid,issue_id,status,updated_at FROM old_compatibility")
+            db.execSQL("DROP TABLE old_compatibility")
+        }
+    }
+
+    private fun createCompatibility(db: SQLiteDatabase) {
+        db.execSQL("CREATE TABLE compatibility(platform TEXT NOT NULL,titleid TEXT NOT NULL COLLATE NOCASE,issue_id INTEGER NOT NULL,status TEXT NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(platform,titleid))")
     }
 
     private fun createUpdates(db: SQLiteDatabase, legacy: Boolean = false) {
@@ -115,14 +126,15 @@ class Store(context: Context, databaseName: String = "pkgj_android.db") : SQLite
         it.downloadType == DownloadType.UPDATE && it.titleId == titleId && it.patchVersion == version && it.category == category && it.patchPart == part
     }
 
-    fun replaceCompatibility(reports: List<CompatibilityReport>) {
+    fun replaceCompatibility(reports: List<CompatibilityReport>, platform: Platform = Platform.VITA) {
+        require(reports.all { it.platform == platform })
         val db = writableDatabase
         db.beginTransaction()
         try {
-            db.delete("compatibility", null, null)
+            db.delete("compatibility", "platform=?", arrayOf(platform.name))
             reports.forEach { report ->
                 db.insertWithOnConflict("compatibility", null, ContentValues().apply {
-                    put("titleid", report.titleId); put("issue_id", report.issueId)
+                    put("platform", platform.name); put("titleid", report.titleId); put("issue_id", report.issueId)
                     put("status", report.status); put("updated_at", report.updatedAt)
                 }, SQLiteDatabase.CONFLICT_REPLACE)
             }
@@ -130,11 +142,12 @@ class Store(context: Context, databaseName: String = "pkgj_android.db") : SQLite
         } finally { db.endTransaction() }
     }
 
-    fun compatibilityReports(): Map<String, CompatibilityReport> = buildMap {
-        readableDatabase.rawQuery("SELECT titleid,issue_id,status,updated_at FROM compatibility", null).use { c ->
+    fun compatibilityReports(): Map<CompatibilityKey, CompatibilityReport> = buildMap {
+        readableDatabase.rawQuery("SELECT titleid,issue_id,status,updated_at,platform FROM compatibility", null).use { c ->
             while (c.moveToNext()) {
                 val titleId = c.getString(0)
-                put(titleId, CompatibilityReport(titleId, c.getLong(1), c.getString(2), c.getLong(3)))
+                val report = CompatibilityReport(titleId, c.getLong(1), c.getString(2), c.getLong(3), Platform.valueOf(c.getString(4)))
+                put(report.key, report)
             }
         }
     }
@@ -226,6 +239,9 @@ class Store(context: Context, databaseName: String = "pkgj_android.db") : SQLite
         "SELECT rap FROM catalog WHERE category=? AND content=?", arrayOf(category.name, contentId)).use { c ->
         if (c.moveToFirst()) c.getString(0) else ""
     }
+    fun clearDownloadHistory(): Int = writableDatabase.delete("jobs",
+        "(state='DOWNLOADED' AND folder_uri IS NOT NULL AND update_check NOT IN ('PENDING','FAILED')) OR (state='CANCELED' AND bytes=0 AND (error IS NULL OR error=''))", null)
+
     fun removeJob(id: Long) { writableDatabase.delete("jobs", "id=?", arrayOf(id.toString())) }
     fun transition(id: Long, to: JobState): Boolean {
         val from = JobState.entries.filter { JobTransitions.canMove(it, to) }

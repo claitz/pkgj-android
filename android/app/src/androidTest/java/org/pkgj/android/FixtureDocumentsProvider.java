@@ -20,7 +20,7 @@ public final class FixtureDocumentsProvider extends DocumentsProvider {
     private File file(String id) {
         if ("root".equals(id)) return root();
         File file = new File(root(), id);
-        try { if (!file.getCanonicalFile().getParentFile().equals(root().getCanonicalFile())) throw new IllegalArgumentException(); }
+        try { if (!file.getCanonicalPath().startsWith(root().getCanonicalPath() + File.separator)) throw new IllegalArgumentException(); }
         catch (IOException e) { throw new IllegalArgumentException(e); }
         return file;
     }
@@ -41,7 +41,7 @@ public final class FixtureDocumentsProvider extends DocumentsProvider {
         if (files != null) for (File f : files) {
             if (!f.exists()) continue;
             Map<String,Object> values = new HashMap<>();
-            values.put(Document.COLUMN_DOCUMENT_ID, f.equals(root()) ? "root" : f.getName());
+            values.put(Document.COLUMN_DOCUMENT_ID, f.equals(root()) ? "root" : root().toPath().relativize(f.toPath()).toString());
             values.put(Document.COLUMN_DISPLAY_NAME, f.getName()); values.put(Document.COLUMN_SIZE, f.length());
             values.put(Document.COLUMN_MIME_TYPE, f.isDirectory() ? Document.MIME_TYPE_DIR : "application/octet-stream");
             values.put(Document.COLUMN_FLAGS, f.isDirectory() ? Document.FLAG_DIR_SUPPORTS_CREATE : Document.FLAG_SUPPORTS_WRITE | Document.FLAG_SUPPORTS_RENAME | Document.FLAG_SUPPORTS_DELETE);
@@ -55,21 +55,25 @@ public final class FixtureDocumentsProvider extends DocumentsProvider {
         return ParcelFileDescriptor.open(file(id), ParcelFileDescriptor.parseMode(mode));
     }
     @Override public String createDocument(String parent, String mime, String name) throws FileNotFoundException {
-        if (!"root".equals(parent)) throw new FileNotFoundException();
-        File f = file(name);
+        if (!file(parent).isDirectory() || name.contains("/") || name.equals("..")) throw new FileNotFoundException();
+        String id = "root".equals(parent) ? name : parent + "/" + name;
+        File f = file(id);
         try { if (!(Document.MIME_TYPE_DIR.equals(mime) ? f.mkdir() : f.createNewFile())) throw new IOException(); }
         catch (IOException e) { throw new FileNotFoundException(e.toString()); }
-        return name;
+        return id;
     }
     @Override public String renameDocument(String id, String name) throws FileNotFoundException {
         if (new File(root(), "fail-rename").delete()) throw new FileNotFoundException("Fixture rename failure");
-        if (file(name).exists() || !file(id).renameTo(file(name))) throw new FileNotFoundException("Rename failed");
-        return name;
+        if (name.contains("/") || name.equals("..")) throw new FileNotFoundException();
+        File target = new File(file(id).getParentFile(), name);
+        if (target.exists() || !file(id).renameTo(target)) throw new FileNotFoundException("Rename failed");
+        return root().toPath().relativize(target.toPath()).toString();
     }
     @Override public void deleteDocument(String id) throws FileNotFoundException { if (!file(id).delete()) throw new FileNotFoundException(); }
-    @Override public boolean isChildDocument(String parent, String id) { return "root".equals(parent) && file(id).exists(); }
+    @Override public boolean isChildDocument(String parent, String id) { return !parent.equals(id) && file(id).exists() && file(id).toPath().startsWith(file(parent).toPath()); }
+    private void removeTree(File f) { File[] children = f.listFiles(); if (children != null) for (File child : children) removeTree(child); f.delete(); }
     @Override public Bundle call(String method, String arg, Bundle extras) {
-        if ("reset-fixtures".equals(method)) { File[] files = root().listFiles(); if (files != null) for (File f : files) f.delete(); return new Bundle(); }
+        if ("reset-fixtures".equals(method)) { File[] files = root().listFiles(); if (files != null) for (File f : files) removeTree(f); return new Bundle(); }
         if ("fail-next-rename".equals(method)) { try { new File(root(), "fail-rename").createNewFile(); } catch (IOException e) { throw new IllegalStateException(e); } return new Bundle(); }
         return super.call(method, arg, extras);
     }

@@ -23,7 +23,7 @@ import kotlinx.coroutines.launch
 import org.pkgj.android.catalog.CatalogItem
 import org.pkgj.android.catalog.CatalogParser
 import org.pkgj.android.catalog.Category
-import org.pkgj.android.compatibility.CompatibilityReport
+import org.pkgj.android.compatibility.*
 
 @Composable
 internal fun ItemDialog(item: CatalogItem, report: CompatibilityReport?, repository: org.pkgj.android.data.Repository, onDismiss: () -> Unit, onQueue: (List<CatalogItem>) -> Unit) {
@@ -61,7 +61,7 @@ internal fun ItemDialog(item: CatalogItem, report: CompatibilityReport?, reposit
                                     Text(item.titleId, color = Mint, style = MaterialTheme.typography.labelLarge)
                                     Text(item.title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                                 }
-                                if (item.category == Category.GAMES) CompatibilityPill(report?.status ?: "Unreported")
+                                if (item.category.hasCompatibility) CompatibilityPill(report?.status ?: "Unreported", item.category.platform)
                             }
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                 DetailValue("Region", item.region, Modifier.weight(1f))
@@ -73,7 +73,7 @@ internal fun ItemDialog(item: CatalogItem, report: CompatibilityReport?, reposit
                         } else {
                             Text(item.titleId, color = Mint, style = MaterialTheme.typography.labelLarge)
                             Text(item.title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-                            if (item.category == Category.GAMES) CompatibilityPill(report?.status ?: "Unreported")
+                            if (item.category.hasCompatibility) CompatibilityPill(report?.status ?: "Unreported", item.category.platform)
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
                                 DetailValue("Region", item.region, Modifier.weight(1f))
                                 DetailValue("Size", item.size?.let(::sizeLabel) ?: "Unknown", Modifier.weight(1f))
@@ -85,14 +85,13 @@ internal fun ItemDialog(item: CatalogItem, report: CompatibilityReport?, reposit
                             }
                             if (item.version.isNotEmpty()) DetailValue(if (item.category.hasLicense) "License" else "Format", licenseSummary(item))
                         }
-                        if (item.category == Category.GAMES) {
+                        if (item.category.hasCompatibility) {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                val url = report?.let { "https://github.com/Vita3K/compatibility/issues/${it.issueId}" }
-                                    ?: "https://github.com/Vita3K/compatibility/issues?q=${java.net.URLEncoder.encode(item.titleId, "UTF-8")}"
+                                val url = compatibilityUrl(item.titleId, item.category.platform, report)
                                 TextButton(onClick = { uri.openUri(url) }, modifier = Modifier.controllerFocus()) {
                                     Text(if (report == null) "Search compatibility reports" else "Compatibility report")
                                 }
-                                report?.let { Text("Updated ${reportDate(it.updatedAt)}", color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                report?.takeIf { it.updatedAt > 0 }?.let { Text("Updated ${reportDate(it.updatedAt)}", color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     style = MaterialTheme.typography.bodySmall) }
                             }
                         }

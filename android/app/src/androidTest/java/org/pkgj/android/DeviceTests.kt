@@ -24,6 +24,7 @@ import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import org.pkgj.android.catalog.*
 import org.pkgj.android.compatibility.CompatibilityReport
+import org.pkgj.android.compatibility.CompatibilityKey
 import org.pkgj.android.data.Repository
 import org.pkgj.android.data.Store
 import org.pkgj.android.download.*
@@ -74,6 +75,7 @@ class DeviceTests {
                     CompatibilityReport("PCSE90001", 1, "Playable", 1),
                     CompatibilityReport("PCSE90002", 2, "Ingame + / Menu", 1),
                     CompatibilityReport("PCSE90003", 3, "Intro", 1)))
+                store.replaceCompatibility(listOf(CompatibilityReport("NPUB90001", 0, "Playable", 1, Platform.PS3)), Platform.PS3)
             }
         }
         override fun after() { InstrumentationRegistry.getInstrumentation().uiAutomation.dropShellPermissionIdentity() }
@@ -128,8 +130,10 @@ class DeviceTests {
             compose.waitUntil(5_000) { compose.onAllNodesWithText("Queue 5").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithText("Queue 2").assertIsDisplayed()
             key(KeyEvent.KEYCODE_BUTTON_R1)
+            Platform.entries.forEach { compose.onNodeWithContentDescription("Choose ${it.label} folder").assertIsDisplayed() }
+            settingsSection("Catalogs")
             compose.onNodeWithText("URL").assertIsDisplayed()
-            compose.onNodeWithText("Choose folder").assertIsDisplayed()
+            settingsSection("About")
             compose.onNodeWithText("BSD 2-Clause").assertIsDisplayed()
         } finally { ids.forEach { repo.store.removeJob(it) }; repo.refreshJobs() }
     }
@@ -310,6 +314,201 @@ class DeviceTests {
         context.deleteDatabase(file.name)
     }
 
+    @Test fun schema9MigrationPreservesVitaCacheAndDownloadsAndSeparatesPs3() {
+        val name = "compatibility-migration.db"
+        context.deleteDatabase(name)
+        // Start with the real current job/catalog layout, replacing only the v9 table.
+        Store(context, name).use { store ->
+            val item = CatalogItem(Category.GAMES, "PCSE90001", content, "EU", "Migration fixture", "https://example.invalid/base", 100)
+            val id = store.addJob(item, "fixture.pkg", tree.toString())
+            store.update(id, state = JobState.PAUSED, bytes = 37, total = 100)
+            val db = store.writableDatabase
+            db.execSQL("DROP TABLE compatibility")
+            db.execSQL("CREATE TABLE compatibility(titleid TEXT PRIMARY KEY COLLATE NOCASE,issue_id INTEGER NOT NULL,status TEXT NOT NULL,updated_at INTEGER NOT NULL)")
+            db.execSQL("INSERT INTO compatibility VALUES('PCSE90001',123,'Playable',456)")
+            db.version = 9
+        }
+        Store(context, name).use { store ->
+            val vita = CompatibilityKey(Platform.VITA, "PCSE90001")
+            assertEquals(123L, store.compatibilityReports().getValue(vita).issueId)
+            assertEquals(456L, store.compatibilityReports().getValue(vita).updatedAt)
+            val job = store.jobs().single()
+            assertEquals(JobState.PAUSED, job.state); assertEquals(37L, job.bytes)
+            assertEquals(tree.toString(), job.folderUri)
+            // Deliberately reuse an ID to prove neither source can overwrite the other.
+            store.replaceCompatibility(listOf(CompatibilityReport("PCSE90001", 0, "Ingame", 1, Platform.PS3)), Platform.PS3)
+            assertEquals(2, store.compatibilityReports().size)
+            assertEquals("Playable", store.compatibilityReports().getValue(vita).status)
+            store.replaceCompatibility(emptyList(), Platform.PS3)
+            assertEquals(setOf(vita), store.compatibilityReports().keys)
+        }
+        context.deleteDatabase(name)
+    }
+
+    @Test fun ps3StatusFiltersAndDetailsWorkWithController() {
+        choosePlatform("PS3")
+        compose.onAllNodesWithText("Playable").onLast().assertIsDisplayed()
+        compose.onNodeWithContentDescription("Compatibility").performSemanticsAction(SemanticsActions.RequestFocus)
+        key(KeyEvent.KEYCODE_BUTTON_A)
+        compose.onNodeWithText("Ingame").assertExists()
+        compose.onNodeWithText("Loadable").assertExists()
+        compose.onAllNodesWithText("Bootable").assertCountEquals(0)
+        compose.onAllNodesWithText("Playable").onLast().performSemanticsAction(SemanticsActions.RequestFocus)
+        key(KeyEvent.KEYCODE_BUTTON_A)
+        key(KeyEvent.KEYCODE_BUTTON_B)
+        compose.onNodeWithText("PS3 fixture").assertIsDisplayed()
+        compose.onNodeWithText("PS3 fixture").performSemanticsAction(SemanticsActions.RequestFocus)
+        key(KeyEvent.KEYCODE_BUTTON_A)
+        compose.onNodeWithText("Compatibility report").assertExists()
+        compose.onAllNodesWithText("Playable").onLast().assertIsDisplayed()
+        key(KeyEvent.KEYCODE_BUTTON_B)
+        compose.onNodeWithText("PS3 fixture").assertIsFocused()
+        Store(context).use { store ->
+            assertEquals(1, store.count(CatalogFilter(platform = Platform.PS3, compatibilityStatuses = setOf("Playable"))))
+            assertEquals(0, store.count(CatalogFilter(platform = Platform.PS3, compatibilityStatuses = setOf("Ingame"))))
+            assertEquals(0, store.count(CatalogFilter(platform = Platform.PS3, compatibilityStatuses = setOf("Unreported"))))
+            assertEquals(1, store.count(CatalogFilter(compatibilityStatuses = setOf("Unreported"))))
+        }
+    }
+
+    @Test fun sharedFolderPreferencesMigrateOnceWithoutOverwritingPlatformChoices() {
+        val prefs = context.getSharedPreferences("folder-migration-fixture", Context.MODE_PRIVATE)
+        prefs.edit().clear().putString("exportFolder", "content://legacy/tree/root")
+            .putString("downloadFolder_PS3", "content://custom/tree/ps3").commit()
+        val folders = org.pkgj.android.data.DownloadFolders(prefs)
+        assertEquals("content://custom/tree/ps3", folders.read()[Platform.PS3])
+        for (platform in listOf(Platform.VITA, Platform.PSP, Platform.PSX))
+            assertEquals("content://legacy/tree/root", folders.read()[platform])
+        assertFalse(prefs.contains("exportFolder"))
+        folders.set(Platform.PSP, null)
+        assertNull(org.pkgj.android.data.DownloadFolders(prefs).read()[Platform.PSP])
+        assertEquals("content://legacy/tree/root", folders.read()[Platform.VITA])
+        prefs.edit().clear().commit()
+        assertTrue(org.pkgj.android.data.DownloadFolders(prefs).read().isEmpty())
+        prefs.edit().clear().commit()
+    }
+
+    @Test fun platformDownloadsUseSeparateFoldersAndOldJobsKeepTheirDestination() {
+        val repo = Repository.get(context)
+        val previous = repo.downloadFolders.value
+        val root = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, tree)!!
+        val directories = listOf("vita", "psp", "ps1", "ps3")
+        directories.forEach { root.createDirectory(it)!! }
+        val chosen = Platform.entries.zip(directories).associate { (platform, dir) ->
+            platform to DocumentsContract.buildTreeDocumentUri(tree.authority!!, dir)
+        }
+        val ids = mutableListOf<Long>()
+        MockWebServer().use { server ->
+            server.dispatcher = object : Dispatcher() { override fun dispatch(request: RecordedRequest) = MockResponse().setBody("fixture") }
+            val categories = listOf(Category.GAMES, Category.PSP, Category.PSX, Category.PS3_GAMES)
+            val titleIds = listOf("PCSE90001", "NPJH90001", "NPEF90001", "NPUB90001")
+            val items = categories.mapIndexed { index, category ->
+                CatalogItem(category, titleIds[index], "UP0000-${titleIds[index]}_00-0000000000000000", "US",
+                    "Folder ${category.platform.name}", server.url("/${category.platform.name}").toString(), 7)
+            }
+            // A persisted paused job retains its old root even after Vita's preference changes.
+            val retained = repo.store.addJob(items.first().copy(title = "Retained destination"), "retained.pkg", tree.toString())
+            repo.store.update(retained, state = JobState.PAUSED)
+            ids += retained
+            try {
+                chosen.forEach { (platform, uri) -> repo.setExportFolder(uri, platform) }
+                repo.queue(items)
+                ids += items.map { item -> repo.store.jobs().first { it.title == item.title }.id }
+                repo.action(repo.store.job(retained)!!, JobState.QUEUED)
+                ids.forEach { id ->
+                    val job = awaitJob(id) { it.state == JobState.DOWNLOADED }
+                    val expected = if (id == retained) tree else chosen.getValue(job.category.platform)
+                    assertEquals(expected.toString(), job.folderUri)
+                    assertEquals(DocumentsContract.getTreeDocumentId(expected), DocumentsContract.getTreeDocumentId(Uri.parse(job.packageUri)))
+                    assertArrayEquals("fixture".toByteArray(), context.contentResolver.openInputStream(Uri.parse(job.packageUri))!!.use { it.readBytes() })
+                }
+                repo.clearExportFolder(Platform.PSP)
+                assertNull(repo.downloadFolder(Platform.PSP))
+                assertEquals(chosen[Platform.PS3].toString(), repo.downloadFolder(Platform.PS3))
+                assertEquals(chosen[Platform.VITA].toString(), repo.downloadFolder(Platform.VITA))
+            } finally {
+                ids.forEach { id -> repo.store.job(id)?.let { repo.discardDownloadFiles(it) }; repo.store.removeJob(id) }
+                Platform.entries.forEach { platform -> previous[platform]?.let { repo.setExportFolder(Uri.parse(it), platform) } ?: repo.clearExportFolder(platform) }
+                repo.refreshJobs()
+            }
+        }
+    }
+
+    @Test fun historyClearPreservesRetryableJobsAndPendingDiscovery() {
+        val name = "history-fixture.db"
+        context.deleteDatabase(name)
+        Store(context, name).use { store ->
+            val retained = mutableSetOf<Long>()
+            var counter = 0
+            fun add(state: JobState, bytes: Long = 0, updateCheck: String = "", error: String = "", keep: Boolean) {
+                val item = CatalogItem(Category.GAMES, "PCSE90001", "history-${counter++}", "JP", "History", "https://example.invalid/pkg", 100)
+                val id = store.addJob(item, "history-$counter.pkg", tree.toString())
+                store.update(id, state = state, bytes = bytes, error = error)
+                if (updateCheck.isNotEmpty()) store.setUpdateCheck(id, updateCheck)
+                assertEquals(!keep, store.job(id)!!.isHistory)
+                if (keep) retained += id
+            }
+            add(JobState.DOWNLOADED, bytes = 100, keep = false)
+            add(JobState.CANCELED, keep = false)
+            add(JobState.QUEUED, keep = true)
+            add(JobState.RUNNING, bytes = 33, keep = true)
+            add(JobState.PAUSED, bytes = 44, keep = true)
+            add(JobState.FAILED, bytes = 55, keep = true)
+            add(JobState.DOWNLOADED, updateCheck = "PENDING", keep = true)
+            add(JobState.DOWNLOADED, updateCheck = "FAILED", keep = true)
+            add(JobState.CANCELED, bytes = 10, keep = true)
+            add(JobState.CANCELED, error = "Could not remove partial file", keep = true)
+            val privateItem = CatalogItem(Category.PSP, "NPJH90001", "private-history", "JP", "Private file", "https://example.invalid/pkg", 100)
+            val privateId = store.addJob(privateItem, "private-history.pkg")
+            store.update(privateId, state = JobState.DOWNLOADED, bytes = 100)
+            assertFalse(store.job(privateId)!!.isHistory)
+            retained += privateId
+            assertEquals(2, store.clearDownloadHistory())
+            assertEquals(retained, store.jobs().map { it.id }.toSet())
+            assertEquals(44L, store.jobs().single { it.state == JobState.PAUSED }.bytes)
+            assertEquals(0, store.clearDownloadHistory())
+        }
+        context.deleteDatabase(name)
+    }
+
+    @Test fun controllerCanClearHistoryWithoutRemovingFilesOrPausedJobs() {
+        val repo = Repository.get(context)
+        val root = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, tree)!!
+        val pkg = root.createFile("application/octet-stream", "history-preserved.pkg")!!
+        context.contentResolver.openOutputStream(pkg.uri)!!.use { it.write("fixture".toByteArray()) }
+        val item = CatalogItem(Category.PSP, "NPJH90001", "history-complete", "JP", "Saved history fixture", "http://127.0.0.1/unused", 7)
+        val completed = repo.store.addJob(item, "history-preserved.pkg", tree.toString())
+        repo.store.update(completed, state = JobState.DOWNLOADED, bytes = 7, packageUri = pkg.uri.toString(), transferComplete = true)
+        val paused = repo.store.addJob(item.copy(contentId = "history-paused", title = "Paused history fixture"), "paused-history.pkg", tree.toString())
+        repo.store.update(paused, state = JobState.PAUSED, bytes = 3, total = 7)
+        repo.refreshJobs()
+        try {
+            key(KeyEvent.KEYCODE_BUTTON_R1)
+            compose.onNodeWithText("Clear history").performSemanticsAction(SemanticsActions.RequestFocus)
+            key(KeyEvent.KEYCODE_BUTTON_A)
+            compose.onNodeWithText("Clear history?").assertExists()
+            compose.onAllNodesWithText("Cancel").onLast().assertIsFocused()
+            key(KeyEvent.KEYCODE_BUTTON_B)
+            compose.onNodeWithText("Clear history").assertIsFocused()
+            assertNotNull(repo.store.job(completed))
+            key(KeyEvent.KEYCODE_BUTTON_A)
+            key(KeyEvent.KEYCODE_DPAD_LEFT)
+            if (compose.onAllNodes(hasText("Clear") and isFocused()).fetchSemanticsNodes().isEmpty()) key(KeyEvent.KEYCODE_DPAD_RIGHT)
+            compose.onNodeWithText("Clear").assertIsFocused()
+            key(KeyEvent.KEYCODE_BUTTON_A)
+            compose.waitUntil(5_000) { repo.store.job(completed) == null }
+            assertEquals(JobState.PAUSED, repo.store.job(paused)!!.state)
+            assertEquals(3L, repo.store.job(paused)!!.bytes)
+            assertArrayEquals("fixture".toByteArray(), context.contentResolver.openInputStream(pkg.uri)!!.use { it.readBytes() })
+            compose.onNodeWithText("Downloads").assertIsFocused()
+        } finally { repo.store.removeJob(completed); repo.store.removeJob(paused); pkg.delete(); repo.refreshJobs() }
+    }
+
+    private fun settingsSection(name: String) {
+        compose.onNodeWithText(name).performSemanticsAction(SemanticsActions.RequestFocus)
+        key(KeyEvent.KEYCODE_BUTTON_A)
+    }
+
     private fun choosePlatform(label: String) {
         compose.onNodeWithContentDescription("Platform").performSemanticsAction(SemanticsActions.RequestFocus)
         key(KeyEvent.KEYCODE_BUTTON_A)
@@ -336,15 +535,18 @@ class DeviceTests {
         compose.onNodeWithText("PS1 fixture").assertIsDisplayed()
         choosePlatform("PS3")
         compose.onNodeWithText("PS3 fixture").assertIsDisplayed()
-        compose.onAllNodesWithContentDescription("Compatibility").assertCountEquals(0)
+        compose.onNodeWithContentDescription("Compatibility").assertExists()
+        compose.onAllNodesWithText("Playable").onLast().assertIsDisplayed()
         compose.onNodeWithText("PS3 fixture").performSemanticsAction(SemanticsActions.RequestFocus)
         key(KeyEvent.KEYCODE_BUTTON_A)
         compose.onNodeWithText("RAP available").assertExists()
+        compose.onAllNodesWithText("Playable").onLast().assertIsDisplayed()
         compose.onNodeWithText("None available").assertExists()
         compose.onAllNodesWithText("Unreported").assertCountEquals(0)
         key(KeyEvent.KEYCODE_BUTTON_B)
         key(KeyEvent.KEYCODE_BUTTON_R1)
         key(KeyEvent.KEYCODE_BUTTON_R1)
+        settingsSection("Catalogs")
         choosePlatform("PS3")
         compose.onNodeWithText("URL").assertIsDisplayed()
         compose.onNodeWithText("https://nopaystation.com/tsv/PS3_GAMES.tsv").assertExists()
@@ -352,7 +554,7 @@ class DeviceTests {
 
     @Test fun pspAndPs1UseThePersistentFolderQueueWithoutLicenseFiles() {
         val repo = Repository.get(context)
-        repo.setExportFolder(tree)
+        repo.setExportFolder(tree, Platform.PSP); repo.setExportFolder(tree, Platform.PSX)
         MockWebServer().use { server ->
             server.dispatcher = object : Dispatcher() {
                 override fun dispatch(request: RecordedRequest) = MockResponse().setBody("synthetic-pkg")
@@ -375,7 +577,7 @@ class DeviceTests {
 
     @Test fun ps3GameDownloadsRapAndAllUpdatesInManifestOrder() {
         val repo = Repository.get(context)
-        repo.setExportFolder(tree)
+        repo.setExportFolder(tree, Platform.PS3)
         MockWebServer().use { server ->
             server.dispatcher = object : Dispatcher() {
                 override fun dispatch(request: RecordedRequest) = MockResponse().setBody(request.path.orEmpty())
@@ -418,6 +620,7 @@ class DeviceTests {
             db.execSQL("CREATE TABLE update_checks(titleid TEXT PRIMARY KEY,checked_at INTEGER NOT NULL,version TEXT,url TEXT,size INTEGER,firmware TEXT)")
             db.execSQL("INSERT INTO jobs(category,content,title,url,filename,state,bytes,type,titleid,patch_version) VALUES('GAMES','update:PCSE90001:01.02','Legacy patch','https://example.invalid/patch','legacy.pkg','PAUSED',123,'UPDATE','PCSE90001','01.02')")
             db.execSQL("INSERT INTO update_checks VALUES('PCSE90001',12345,'01.02','https://example.invalid/patch',123,'3.60')")
+            db.execSQL("CREATE TABLE compatibility(titleid TEXT PRIMARY KEY COLLATE NOCASE,issue_id INTEGER NOT NULL,status TEXT NOT NULL,updated_at INTEGER NOT NULL)")
             db.version = 8
         }
         Store(context, name).use { store ->
@@ -499,7 +702,7 @@ class DeviceTests {
         compose.onNodeWithText("All regions").performClick()
         fun choice(text: String) = compose.onNode(hasText(text) and hasAnyAncestor(isPopup()))
         choice("EU").performClick(); choice("US").performClick(); choice("Done").performClick()
-        compose.onNodeWithText("Any status").performClick()
+        compose.onNodeWithText("Any status").performSemanticsAction(SemanticsActions.OnClick) { it() }
         choice("Playable").performClick(); choice("Ingame +").performClick(); choice("Done").performClick()
         compose.onNodeWithText("2 statuses").assertExists()
         compose.onNodeWithText("Alpha").assertExists(); compose.onNodeWithText("Beta").assertExists()
@@ -562,7 +765,8 @@ class DeviceTests {
         compose.onNodeWithText("Downloads").assertIsSelected()
         key(KeyEvent.KEYCODE_BUTTON_R1)
         compose.onNodeWithText("Settings").assertIsSelected()
-        key(KeyEvent.KEYCODE_DPAD_DOWN)
+        settingsSection("Catalogs")
+        compose.onNodeWithText("Games").performSemanticsAction(SemanticsActions.RequestFocus)
         compose.onNodeWithText("Games").assertIsFocused()
         key(KeyEvent.KEYCODE_DPAD_DOWN)
         compose.onNodeWithText("URL").assertIsFocused()
@@ -581,9 +785,10 @@ class DeviceTests {
     @Test fun settingsAboutAndLicenseAreReachableWithControllerOnly() {
         key(KeyEvent.KEYCODE_BUTTON_L1)
         compose.onNodeWithText("Settings").assertIsSelected()
+        settingsSection("About")
         repeat(4) { key(KeyEvent.KEYCODE_BUTTON_R2); compose.waitForIdle() }
         var found = false
-        for (step in 0..8) {
+        for (step in 0..12) {
             if (compose.onAllNodes(hasText("BSD 2-Clause") and isFocused()).fetchSemanticsNodes().isNotEmpty()) { found = true; break }
             key(KeyEvent.KEYCODE_DPAD_DOWN); compose.waitForIdle()
         }
@@ -647,6 +852,8 @@ class DeviceTests {
         repo.refreshJobs()
         key(KeyEvent.KEYCODE_BUTTON_R1)
         compose.onNodeWithText("Downloads").assertIsSelected()
+        key(KeyEvent.KEYCODE_DPAD_DOWN)
+        compose.onNodeWithText("Clear history").assertIsFocused()
         key(KeyEvent.KEYCODE_DPAD_DOWN)
         compose.onAllNodes(hasText("Delete") and isFocused()).assertCountEquals(1)
         key(KeyEvent.KEYCODE_BUTTON_A)

@@ -34,12 +34,12 @@ class PlatformTests {
         assertTrue(parse(csv.replace(content, "../../bad"), Category.PS3_GAMES).isEmpty())
         assertTrue(parse(csv.replace("\"Title, deluxe\"", "\"unfinished"), Category.PS3_GAMES).isEmpty())
     }
-    @Test fun platformFiltersKeepCompatibilityExclusiveToVitaGames() {
+    @Test fun platformFiltersKeepCompatibilityScopedToVitaAndPs3Games() {
         Platform.entries.forEach { platform ->
             val (sql, args) = CatalogFilter(platform = platform, regions = setOf("EU", "US"), compatibilityStatuses = setOf("Playable")).sqlWhere()
             assertTrue(sql.contains("region IN (?,?)"))
             assertTrue(args.toList().containsAll(platform.categories().map { it.name }))
-            assertEquals(platform == Platform.VITA, sql.contains("compatibility c"))
+            assertEquals(platform == Platform.VITA || platform == Platform.PS3, sql.contains("compatibility c"))
         }
         val (_, args) = CatalogFilter(category = Category.PSP.name).sqlWhere()
         assertArrayEquals(arrayOf("PSP", "PSP", "PSP_DLC"), args)
